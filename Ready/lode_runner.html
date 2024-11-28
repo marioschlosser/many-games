@@ -1,0 +1,1237 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Lode Runner</title>
+    <style>
+        canvas {
+            background: black;
+            display: block;
+            margin: 0 auto;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <script>
+        const GRID_SIZE = 20;
+        const ROWS = 30;
+        const COLS = 25;
+
+        const TILE_EMPTY = 0;
+        const TILE_BRICK = 1;
+        const TILE_LADDER = 2;
+        const TILE_ROPE = 3;
+        const TILE_GOLD = 4;
+        const TILE_DIGGING = 5;
+
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Set canvas size
+        canvas.width = COLS * GRID_SIZE;
+        canvas.height = ROWS * GRID_SIZE;
+
+        class Entity {
+            constructor(x, y, type) {
+                this.x = x;
+                this.y = y;
+                this.type = type; // 'player' or 'enemy'
+                this.state = 'falling';
+                this.alive = true;
+                
+                // Add visual position properties for smooth movement
+                this.visualX = x;
+                this.visualY = y;
+                this.MOVE_SPEED = 0.2;  // Adjust this to control movement speed
+                this.direction = 1;  // 1 for right, -1 for left
+                this.verticalDirection = 0;  // 1 for down, -1 for up, 0 for none
+            }
+        }
+
+        class Game {
+            constructor() {
+                // Constants for entity states
+                this.STATES = {
+                    STANDING: 'standing',
+                    FALLING: 'falling',
+                    CLIMBING: 'climbing',
+                    HANGING: 'hanging',
+                    DIGGING: 'digging'
+                };
+
+                // Level symbols (from the walkthrough documentation)
+                this.SYMBOLS = {
+                    ' ': TILE_EMPTY,   // Empty space
+                    'X': TILE_BRICK,   // Ground (can dig)
+                    '*': TILE_BRICK,   // Cement (no dig) - for now treating same as brick
+                    'H': TILE_LADDER,  // Ladder
+                    '~': TILE_ROPE,    // Rope
+                    '$': TILE_EMPTY,   // Gold position (will be stored in goldMap)
+                    'h': TILE_LADDER,  // Completion ladder (for now treating as normal ladder)
+                    '+': TILE_EMPTY,   // Player start position
+                    '-': TILE_EMPTY    // Enemy position (not used yet)
+                };
+
+                // Level 1 layout (copied directly from the walkthrough)
+                this.LEVEL_DATA = [
+                    "               h  ",
+                    "    $           h ",
+                    " XXXXXHXXXXXX   h ",
+                    " XXXXXHXXXXXX   h ",
+                    "      H~~~~~~~~~h ",
+                    "      H         h ",
+                    "      H         h   $",
+                    "      H    XH   XXXXXXHXX",
+                    "      H    XH   XXXXXXHXX",
+                    "      H    XH         H",
+                    "      H    XH         H",
+                    "    - H    XH     $ - H",
+                    " XXHXXX    XXXXXXXXHXXXXX",
+                    " XXHXXX    XXXXXXXXHXXXXX",
+                    "   H               H",
+                    "   H               H",
+                    "   H         -     H",
+                    " XXXXXXXHXXXXXXXXXXH",
+                    " XXXXXXXHXXXXXXXXXXH",
+                    "        H          H",
+                    "        H~~~~~~~~~~H",
+                    "        H          H",
+                    "       $H          H  $",
+                    "     HXXXX         XXXXXH",
+                    "     HXXXX         XXXXXH",
+                    "     H                  H",
+                    "     H                  H",
+                    "     H       +  $       H",
+                    "XXXXXXXXXXXXXXXXXXXXXXXXX",
+                    "XXXXXXXXXXXXXXXXXXXXXXXXX"
+                ];
+
+                // Initialize empty arrays with correct dimensions
+                this.level = Array(ROWS).fill().map(() => Array(COLS).fill(TILE_EMPTY));
+                
+                this.goldMap = Array(ROWS).fill().map(() => Array(COLS).fill(false));
+                
+                // Initialize entities
+                this.player = new Entity(0, 0, 'player');
+                this.enemies = [
+                    new Entity(5, 5, 'enemy'),
+                    new Entity(15, 5, 'enemy')
+                ];
+                
+                this.createLevel();
+
+                // Track digging holes
+                this.holes = [];  // Array of {x, y, timer} objects
+                this.HOLE_DURATION = 300;  // 10 seconds at 30fps
+                
+                // Track player life state
+                this.playerAlive = true;
+
+                // Make enemies move 4x slower than before
+                this.ENEMY_MOVE_INTERVAL = 32;  // Move every 32 frames
+                this.enemyMoveCounter = 0;
+
+                this.lives = 3;
+                this.waitingForRespawn = false;
+
+                // Store initial enemy positions
+                this.enemyStartPositions = [
+                    {x: 5, y: 5},
+                    {x: 15, y: 5}
+                ];
+
+                this.lastDirection = 1;  // 1 for right, -1 for left
+
+                // Animation properties
+                this.animationFrame = 0;
+                this.ANIMATION_SPEED = 5;  // Lower = faster
+                this.lastDirection = 1;
+
+                // Add new animation properties
+                this.effects = [];  // Array to store visual effects
+                this.particles = [];  // Array for particle effects
+                this.digAnimations = [];  // Array for digging animations
+                
+                // Colors and styles
+                this.COLORS = {
+                    brick: ['#964B00', '#8B4513', '#A0522D'],  // Multiple brick colors for variety
+                    ladder: ['#FFD700', '#DAA520'],
+                    rope: ['#8B4513', '#A0522D'],
+                    background: '#000033',  // Slight blue tint to black
+                    particles: ['#FFD700', '#FFA500', '#FF4500']  // Gold colors for particles
+                };
+            }
+
+            createLevel() {
+                // Convert the ASCII level into game tiles
+                for(let y = 0; y < this.LEVEL_DATA.length; y++) {
+                    const row = this.LEVEL_DATA[y].padEnd(COLS, ' ');  // Pad with spaces if row is too short
+                    for(let x = 0; x < COLS; x++) {
+                        const symbol = row[x];
+                        
+                        // Set the tile type
+                        this.level[y][x] = this.SYMBOLS[symbol] || TILE_EMPTY;
+                        
+                        // Handle special tiles
+                        if (symbol === '$') {
+                            this.goldMap[y][x] = true;
+                        } else if (symbol === '+') {
+                            console.log('Setting player position to:', x, y);
+                            this.player.x = x;
+                            this.player.y = y - 1;  // Move up one tile to account for player height
+                            this.player.state = this.STATES.FALLING;
+                        }
+                    }
+                }
+            }
+
+            updateEntity(entity) {
+                if (!entity.alive) return;
+
+                // Check for gold collection
+                if (entity.type === 'player') {
+                    this.checkGoldCollection(entity);
+                }
+
+                // Check for collisions with other entities
+                if (entity.type === 'player') {
+                    this.enemies.forEach(enemy => {
+                        if (enemy.alive && this.checkCollision(entity, enemy)) {
+                            entity.alive = false;
+                        }
+                    });
+                }
+
+                // Update state
+                switch(entity.state) {
+                    case this.STATES.FALLING:
+                        this.handleFalling(entity);
+                        break;
+                    case this.STATES.CLIMBING:
+                        break;  // No automatic state changes while climbing
+                    case this.STATES.STANDING:
+                        this.handleStanding(entity);
+                        break;
+                    case this.STATES.HANGING:
+                        this.handleHanging(entity);
+                        break;
+                }
+
+                // Update enemy AI if it's an enemy
+                if (entity.type === 'enemy' && this.enemyMoveCounter === 0) {
+                    this.updateEnemyAI(entity);
+                }
+            }
+
+            update() {
+                // Update animation frame
+                if (this.frameCount % this.ANIMATION_SPEED === 0) {
+                    this.animationFrame = (this.animationFrame + 1) % 4;
+                }
+
+                // If waiting for respawn, only check for space bar
+                if (this.waitingForRespawn) {
+                    return;
+                }
+
+                // Don't update if player is dead
+                if (!this.player.alive) {
+                    this.lives--;
+                    console.log('Lost a life! Lives remaining:', this.lives);
+                    
+                    if (this.lives > 0) {
+                        this.waitingForRespawn = true;
+                    }
+                    return;
+                }
+
+                // Update enemy move counter
+                this.enemyMoveCounter = (this.enemyMoveCounter + 1) % this.ENEMY_MOVE_INTERVAL;
+
+                // Update all entities using the original movement code
+                this.updateEntity(this.player);
+                this.enemies.forEach(enemy => {
+                    this.updateEntity(enemy);
+                    if (this.enemyMoveCounter === 0) {
+                        this.updateEnemyAI(enemy);
+                    }
+                });
+
+                // Update holes
+                this.updateHoles();
+
+                // Update visual positions for all entities
+                this.updateVisualPosition(this.player);
+                this.enemies.forEach(enemy => {
+                    this.updateVisualPosition(enemy);
+                });
+            }
+
+            handleInput(e) {
+                // Handle space bar for respawn
+                if (e.code === 'Space' && this.waitingForRespawn) {
+                    this.respawnPlayer();
+                    return;
+                }
+
+                // Don't handle other inputs if waiting for respawn
+                if (this.waitingForRespawn) {
+                    return;
+                }
+
+                if (!this.player.alive) return;
+
+                switch(e.key) {
+                    case 'ArrowLeft':
+                        this.moveHorizontally(this.player, -1);
+                        break;
+                    case 'ArrowRight':
+                        this.moveHorizontally(this.player, 1);
+                        break;
+                    case 'ArrowUp':
+                        this.moveVertically(this.player, -1);
+                        break;
+                    case 'ArrowDown':
+                        this.moveVertically(this.player, 1);
+                        break;
+                    case 'z':
+                        this.tryDig(this.player, -1);
+                        break;
+                    case 'x':
+                        this.tryDig(this.player, 1);
+                        break;
+                }
+            }
+
+            reset() {
+                // Full game reset
+                this.lives = 3;
+                this.waitingForRespawn = false;
+                this.player.alive = true;
+                this.holes = [];
+                this.enemies = [];
+                this.enemyStartPositions.forEach(pos => {
+                    this.addEnemy(pos.x, pos.y);
+                });
+                this.createLevel();
+            }
+
+            // Helper method for enemy AI
+            updateEnemyAI(enemy) {
+                if (!enemy.alive || enemy.state === this.STATES.FALLING) {
+                    return;
+                }
+
+                // Decision point check
+                const isAtDecisionPoint = this.isAtDecisionPoint(enemy);
+                
+                if (isAtDecisionPoint) {
+                    this.makeEnemyDecision(enemy);
+                } else {
+                    // Continue in current direction
+                    if (enemy.verticalDirection !== 0) {
+                        // Moving on ladder
+                        if (this.canMoveVertically(enemy, enemy.verticalDirection)) {
+                            this.moveVertically(enemy, enemy.verticalDirection);
+                        } else {
+                            // Can't continue vertically, force a new decision
+                            this.makeEnemyDecision(enemy);
+                        }
+                    } else {
+                        // Moving horizontally
+                        if (this.canMoveHorizontally(enemy, enemy.direction)) {
+                            this.moveHorizontally(enemy, enemy.direction);
+                        } else {
+                            // Hit a wall, force a new decision
+                            this.makeEnemyDecision(enemy);
+                        }
+                    }
+                }
+            }
+
+            // Collision detection methods
+            isSolidBelow(entity) {
+                const belowY = entity.y + 2;  // Check one tile below feet
+                if (belowY >= ROWS) return true;  // Bottom of screen is solid
+                return this.level[belowY][entity.x] === TILE_BRICK;
+            }
+
+            isOnLadder(entity) {
+                if (entity.y < 0 || entity.y >= ROWS || entity.x < 0 || entity.x >= COLS) return false;
+                return this.level[entity.y][entity.x] === TILE_LADDER || 
+                       (entity.y + 1 < ROWS && this.level[entity.y + 1][entity.x] === TILE_LADDER);
+            }
+
+            isAtRope(entity) {
+                if (entity.y <= 0 || entity.y >= ROWS || entity.x < 0 || entity.x >= COLS) return false;
+                return this.level[entity.y - 1][entity.x] === TILE_ROPE;
+            }
+
+            canGrabRope(entity) {
+                return entity.state === this.STATES.FALLING && 
+                       entity.y > 0 &&
+                       this.level[entity.y - 1][entity.x] === TILE_ROPE;
+            }
+
+            getRopeGrabHeight(entity) {
+                // Find the rope that's closest above the entity
+                let y = entity.y - 1;  // Start checking one tile above entity
+                const maxCheckDistance = 3;
+                
+                for (let i = 0; i < maxCheckDistance && y >= 0; i++, y--) {
+                    if (this.level[y][entity.x] === TILE_ROPE) {
+                        return y + 1;  // Return position one tile below the rope
+                    }
+                }
+                return entity.y;
+            }
+
+            isWall(x, y) {
+                if (y < 0 || y >= ROWS || x < 0 || x >= COLS) return true;
+                return this.level[y][x] === TILE_BRICK;
+            }
+
+            // Gold collection
+            checkGoldCollection(entity) {
+                // Add bounds checking
+                if (entity.y >= 0 && entity.y < ROWS && entity.x >= 0 && entity.x < COLS) {
+                    if (this.goldMap[entity.y][entity.x]) {
+                        this.goldMap[entity.y][entity.x] = false;
+                    }
+                }
+                
+                // Check second tile of entity height
+                if (entity.y + 1 >= 0 && entity.y + 1 < ROWS && entity.x >= 0 && entity.x < COLS) {
+                    if (this.goldMap[entity.y + 1][entity.x]) {
+                        this.goldMap[entity.y + 1][entity.x] = false;
+                    }
+                }
+            }
+
+            draw() {
+                // Clear with gradient background
+                const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+                gradient.addColorStop(0, this.COLORS.background);
+                gradient.addColorStop(1, '#000000');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                // Draw level with enhanced visuals
+                for(let y = 0; y < ROWS; y++) {
+                    for(let x = 0; x < COLS; x++) {
+                        switch(this.level[y][x]) {
+                            case TILE_BRICK:
+                                this.drawBrick(x, y);
+                                break;
+                            case TILE_LADDER:
+                                this.drawLadder(x, y);
+                                break;
+                            case TILE_ROPE:
+                                this.drawRope(x, y);
+                                break;
+                        }
+
+                        // Enhanced gold drawing
+                        if (this.goldMap[y][x]) {
+                            this.drawGold(x, y);
+                        }
+                    }
+                }
+
+                // Draw particles
+                this.updateAndDrawParticles();
+
+                // Draw digging animations
+                this.updateAndDrawDigging();
+
+                // Draw holes (optional visual effect)
+                this.holes.forEach(hole => {
+                    ctx.fillStyle = '#4B2500';  // Darker brown
+                    ctx.fillRect(
+                        hole.x * GRID_SIZE, 
+                        hole.y * GRID_SIZE, 
+                        GRID_SIZE, 
+                        GRID_SIZE
+                    );
+                });
+
+                // Draw player if alive
+                if (this.player.alive) {
+                    this.drawEntity(this.player, '#4488FF', '#66AAFF');
+                }
+
+                // Draw enemies
+                this.enemies.forEach(enemy => {
+                    this.drawEntity(enemy, '#FF4444', '#FF6666');
+                });
+
+                // Draw lives
+                ctx.fillStyle = 'white';
+                ctx.font = '16px Arial';
+                ctx.fillText(`Lives: ${this.lives}`, 10, 40);
+
+                // Draw death message if waiting for respawn
+                if (this.waitingForRespawn) {
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';  // Semi-transparent black
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    
+                    ctx.fillStyle = 'white';
+                    ctx.font = '24px Arial';
+                    ctx.textAlign = 'center';
+                    const centerX = canvas.width / 2;
+                    const centerY = canvas.height / 2;
+                    
+                    ctx.fillText(`Life lost! ${this.lives} lives remaining`, centerX, centerY - 20);
+                    ctx.fillText('Press SPACE to continue', centerX, centerY + 20);
+                    
+                    ctx.textAlign = 'left';  // Reset text align
+                }
+
+                // Game Over message
+                if (this.lives <= 0) {
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    
+                    ctx.fillStyle = 'white';
+                    ctx.font = '32px Arial';
+                    ctx.textAlign = 'center';
+                    const centerX = canvas.width / 2;
+                    const centerY = canvas.height / 2;
+                    
+                    ctx.fillText('GAME OVER', centerX, centerY - 20);
+                    ctx.fillText('Press R to restart', centerX, centerY + 20);
+                    
+                    ctx.textAlign = 'left';
+                }
+            }
+
+            drawEntity(entity, mainColor, headColor) {
+                ctx.save();
+                
+                // Use visual position instead of grid position
+                const x = entity.visualX * GRID_SIZE;
+                const y = entity.visualY * GRID_SIZE;
+                
+                // Body
+                ctx.fillStyle = mainColor;
+                ctx.fillRect(x + 2, y + 2, GRID_SIZE - 4, GRID_SIZE * 2 - 4);
+                
+                // Head (slightly rounded)
+                ctx.beginPath();
+                ctx.arc(
+                    x + GRID_SIZE/2,
+                    y + GRID_SIZE/2,
+                    GRID_SIZE/3,
+                    0,
+                    Math.PI * 2
+                );
+                ctx.fillStyle = headColor;
+                ctx.fill();
+
+                // Eyes
+                ctx.fillStyle = 'white';
+                const eyeSize = 4;
+                if (entity.type === 'player') {
+                    // Single eye that looks in movement direction
+                    const lookingRight = this.lastDirection > 0;
+                    ctx.fillRect(
+                        x + (lookingRight ? GRID_SIZE/2 : GRID_SIZE/3),
+                        y + GRID_SIZE/2 - 2,
+                        eyeSize,
+                        eyeSize
+                    );
+                } else {
+                    // Two eyes for enemies
+                    ctx.fillRect(x + GRID_SIZE/3 - eyeSize/2, y + GRID_SIZE/2 - 2, eyeSize, eyeSize);
+                    ctx.fillRect(x + GRID_SIZE*2/3 - eyeSize/2, y + GRID_SIZE/2 - 2, eyeSize, eyeSize);
+                }
+
+                // Legs with animation
+                ctx.strokeStyle = mainColor;
+                ctx.lineWidth = 3;
+                
+                const legOffset = this.getAnimatedLegOffset(entity);
+                
+                if (entity.state === this.STATES.CLIMBING) {
+                    // Climbing animation
+                    this.drawClimbingLegs(x, y, mainColor, legOffset);
+                } else {
+                    // Walking/standing animation
+                    this.drawWalkingLegs(x, y, mainColor, legOffset);
+                }
+                
+                ctx.restore();
+            }
+
+            getAnimatedLegOffset(entity) {
+                if (entity.state === this.STATES.STANDING && !this.isMoving) {
+                    return 0;  // No animation when standing still
+                }
+                
+                const maxOffset = 6;
+                const frameOffset = this.animationFrame * (maxOffset / 2);
+                
+                if (this.animationFrame >= 2) {
+                    return maxOffset - frameOffset;
+                }
+                return frameOffset;
+            }
+
+            drawWalkingLegs(x, y, color, offset) {
+                ctx.beginPath();
+                
+                // Left leg
+                ctx.moveTo(
+                    x + GRID_SIZE/3,
+                    (y + 1) * GRID_SIZE + GRID_SIZE/2
+                );
+                ctx.lineTo(
+                    x + GRID_SIZE/3 - offset,
+                    (y + 2) * GRID_SIZE - 4
+                );
+                
+                // Right leg
+                ctx.moveTo(
+                    x + GRID_SIZE*2/3,
+                    (y + 1) * GRID_SIZE + GRID_SIZE/2
+                );
+                ctx.lineTo(
+                    x + GRID_SIZE*2/3 + offset,
+                    (y + 2) * GRID_SIZE - 4
+                );
+                
+                ctx.stroke();
+            }
+
+            drawClimbingLegs(x, y, color, offset) {
+                ctx.beginPath();
+                
+                // Left leg
+                ctx.moveTo(
+                    x + GRID_SIZE/3,
+                    (y + 1) * GRID_SIZE + GRID_SIZE/2
+                );
+                ctx.lineTo(
+                    x + GRID_SIZE/3 - offset,
+                    (y + 2) * GRID_SIZE - 4
+                );
+                
+                // Right leg
+                ctx.moveTo(
+                    x + GRID_SIZE*2/3,
+                    (y + 1) * GRID_SIZE + GRID_SIZE/2
+                );
+                ctx.lineTo(
+                    x + GRID_SIZE*2/3 + offset,
+                    (y + 2) * GRID_SIZE - 4
+                );
+                
+                ctx.stroke();
+            }
+
+            // New helper method
+            isAtTopOfLadder(entity) {
+                return entity.y + 1 < ROWS && this.level[entity.y + 1][entity.x] === TILE_LADDER;
+            }
+
+            tryDig(entity, direction) {
+                // Can only dig when standing
+                if (entity.state !== this.STATES.STANDING) return;
+
+                const digX = entity.x + direction;
+                const digY = entity.y + 2;  // Dig one tile below feet
+
+                // Check if we can dig here
+                if (digY < ROWS && this.level[digY][digX] === TILE_BRICK) {
+                    // Create the hole
+                    this.level[digY][digX] = TILE_EMPTY;
+                    this.holes.push({
+                        x: digX,
+                        y: digY,
+                        timer: this.HOLE_DURATION
+                    });
+                    entity.state = this.STATES.DIGGING;
+                    // Reset state after brief digging animation
+                    setTimeout(() => {
+                        if (entity.state === this.STATES.DIGGING) {
+                            entity.state = this.STATES.STANDING;
+                        }
+                    }, 150);
+                }
+            }
+
+            isHole(x, y) {
+                return this.holes.some(hole => hole.x === x && hole.y === y);
+            }
+
+            updateHoles() {
+                this.holes = this.holes.filter(hole => {
+                    hole.timer--;
+
+                    // Check if player is in the hole at any time (not just when closing)
+                    const isPlayerInHole = this.player.x === hole.x && 
+                                         (this.player.y === hole.y || this.player.y + 1 === hole.y);
+                    if (isPlayerInHole) {
+                        console.log('Player died in hole!');
+                        this.player.alive = false;
+                        return false;  // Remove the hole immediately
+                    }
+
+                    if (hole.timer <= 0) {
+                        // Check if any enemy is in the hole before filling it
+                        this.enemies = this.enemies.filter(enemy => {
+                            const isInHole = enemy.x === hole.x && 
+                                           (enemy.y === hole.y || enemy.y + 1 === hole.y);
+                            if (isInHole) {
+                                console.log('Enemy died in hole!');
+                                return false;  // Remove the enemy
+                            }
+                            return true;
+                        });
+
+                        // Fill the hole back in
+                        this.level[hole.y][hole.x] = TILE_BRICK;
+                        return false;
+                    }
+                    return true;
+                });
+            }
+
+            checkCollision(entity1, entity2) {
+                return entity1.x === entity2.x && 
+                       Math.abs(entity1.y - entity2.y) <= 1;
+            }
+
+            handleFalling(entity) {
+                // Check for ground collision
+                if (this.isSolidBelow(entity)) {
+                    entity.state = this.STATES.STANDING;
+                    entity.verticalDirection = 0;  // Reset vertical direction when landing
+                    return;
+                }
+
+                // Check for ladder grab
+                if (this.isOnLadder(entity)) {
+                    entity.state = this.STATES.CLIMBING;
+                    return;
+                }
+
+                // Check for rope grab
+                if (this.canGrabRope(entity)) {
+                    entity.state = this.STATES.HANGING;
+                    entity.y = this.getRopeGrabHeight(entity);
+                    return;
+                }
+
+                // Continue falling
+                entity.y++;
+            }
+
+            handleStanding(entity) {
+                // Only fall if we're not on solid ground AND not at the top of a ladder
+                if (!this.isSolidBelow(entity) && !this.isAtTopOfLadder(entity)) {
+                    entity.state = this.STATES.FALLING;
+                }
+            }
+
+            handleHanging(entity) {
+                // Verify we're still at a rope
+                if (!this.isAtRope(entity)) {
+                    entity.state = this.STATES.FALLING;
+                }
+            }
+
+            moveHorizontally(entity, direction) {
+                const newX = entity.x + direction;
+                
+                // Check wall collision for both top and bottom of entity
+                if (this.isWall(newX, entity.y) || this.isWall(newX, entity.y + 1)) {
+                    return;
+                }
+
+                switch(entity.state) {
+                    case this.STATES.HANGING:
+                        // Only allow movement if there's a rope at the same height
+                        if (this.level[entity.y - 1][newX] === TILE_ROPE) {
+                            entity.x = newX;
+                        } else {
+                            // Fall if we move off the rope
+                            entity.x = newX;
+                            entity.state = this.STATES.FALLING;
+                        }
+                        break;
+                        
+                    case this.STATES.CLIMBING:
+                        // Allow moving off ladder at any height if no wall blocking
+                        entity.x = newX;
+                        // Fall if moving off ladder with no support
+                        if (!this.isOnLadder({x: newX, y: entity.y})) {
+                            entity.state = this.STATES.FALLING;
+                        }
+                        break;
+                        
+                    case this.STATES.STANDING:
+                    case this.STATES.FALLING:
+                        entity.x = newX;
+                        break;
+                }
+
+                // Track player direction and movement state
+                if (entity.type === 'player') {
+                    this.lastDirection = direction;
+                    this.isMoving = true;
+                }
+            }
+
+            moveVertically(entity, direction) {
+                const newY = entity.y + direction;
+
+                // Prevent moving out of bounds
+                if (newY < 0 || newY + 1 >= ROWS) return;
+
+                switch(entity.state) {
+                    case this.STATES.HANGING:
+                        // Drop from rope when pressing down
+                        if (direction > 0) {
+                            entity.state = this.STATES.FALLING;
+                            entity.y += 1;  // Start falling immediately
+                            return;
+                        }
+                        break;
+
+                    case this.STATES.CLIMBING:
+                        // Moving up or down while climbing
+                        if (this.level[entity.y][entity.x] === TILE_LADDER || 
+                            this.level[entity.y + 1][entity.x] === TILE_LADDER) {
+                            
+                            // When climbing down, check if we're at the bottom of the ladder
+                            if (direction > 0) {
+                                // Check if current position or next position has no ladder
+                                if (this.level[entity.y][entity.x] === TILE_LADDER &&
+                                    this.level[newY][entity.x] !== TILE_LADDER) {
+                                    if (entity.type === 'player') {
+                                        console.log('Preventing downward movement - no ladder at new position');
+                                    }
+                                    return;
+                                }
+                            }
+                            
+                            entity.y = newY;
+                            // Switch to standing only if we're at a platform
+                            if (this.isSolidBelow({x: entity.x, y: newY})) {
+                                entity.state = this.STATES.STANDING;
+                            }
+                        }
+                        break;
+
+                    case this.STATES.STANDING:
+                        // Start climbing if there's a ladder here
+                        if (this.level[entity.y][entity.x] === TILE_LADDER || 
+                            this.level[entity.y + 1][entity.x] === TILE_LADDER) {
+                            // When trying to climb down, check if we're at the bottom of the ladder
+                            if (direction > 0) {
+                                // Don't allow climbing down if there's no ladder at the new position
+                                // or if the new foot position would be in a solid tile
+                                if (this.level[newY][entity.x] !== TILE_LADDER || 
+                                    this.level[newY + 1][entity.x] === TILE_BRICK) {
+                                    return;
+                                }
+                            }
+                            entity.state = this.STATES.CLIMBING;
+                            entity.y = newY;
+                        }
+                        break;
+                }
+            }
+
+            canMoveVertically(entity, direction) {
+                const newY = entity.y + direction;
+                
+                // Check bounds
+                if (newY < 0 || newY + 1 >= ROWS) return false;
+                
+                // Can move up/down on ladder
+                if (this.level[entity.y][entity.x] === TILE_LADDER) return true;
+                
+                // Can drop from rope
+                if (entity.state === this.STATES.HANGING && direction > 0) return true;
+                
+                // Can climb down if there's a ladder below
+                if (direction > 0 && this.level[entity.y + 1][entity.x] === TILE_LADDER) return true;
+                
+                return false;
+            }
+
+            canMoveHorizontally(entity, direction) {
+                const newX = entity.x + direction;
+                
+                // Check bounds and walls
+                if (newX < 0 || newX >= COLS) return false;
+                if (this.isWall(newX, entity.y) || this.isWall(newX, entity.y + 1)) return false;
+                
+                // Can move if:
+                // 1. Standing on ground
+                // 2. At top of ladder (climbing state)
+                // 3. Hanging from rope
+                if (entity.state === this.STATES.STANDING ||
+                    (entity.state === this.STATES.CLIMBING && this.isSolidBelow(entity)) ||
+                    (entity.state === this.STATES.HANGING && 
+                     this.level[entity.y - 1][newX] === TILE_ROPE)) {
+                    return true;
+                }
+                
+                return false;
+            }
+
+            respawnPlayer() {
+                // Reset player position to starting position
+                this.player.alive = true;
+                this.waitingForRespawn = false;
+                
+                // Find the player start position from the level data
+                for(let y = 0; y < this.LEVEL_DATA.length; y++) {
+                    const row = this.LEVEL_DATA[y];
+                    const x = row.indexOf('+');
+                    if (x !== -1) {
+                        this.player.x = x;
+                        this.player.y = y - 1;
+                        this.player.state = this.STATES.FALLING;
+                        break;
+                    }
+                }
+
+                // Reset positions of surviving enemies
+                this.enemies.forEach((enemy, index) => {
+                    const startPos = this.enemyStartPositions[index];
+                    enemy.x = startPos.x;
+                    enemy.y = startPos.y;
+                    enemy.state = this.STATES.FALLING;
+                });
+
+                // Also reset visual positions
+                this.player.visualX = this.player.x;
+                this.player.visualY = this.player.y;
+                
+                this.enemies.forEach(enemy => {
+                    enemy.visualX = enemy.x;
+                    enemy.visualY = enemy.y;
+                });
+            }
+
+            addEnemy(x, y) {
+                this.enemies.push(new Entity(x, y, 'enemy'));
+            }
+
+            updateVisualPosition(entity) {
+                // Smoothly move visual position toward actual position
+                entity.visualX += (entity.x - entity.visualX) * entity.MOVE_SPEED;
+                entity.visualY += (entity.y - entity.visualY) * entity.MOVE_SPEED;
+            }
+
+            // Add new method for particle effects
+            createParticles(x, y, type) {
+                const count = type === 'gold' ? 10 : 5;
+                for (let i = 0; i < count; i++) {
+                    this.particles.push({
+                        x: x * GRID_SIZE + GRID_SIZE/2,
+                        y: y * GRID_SIZE + GRID_SIZE/2,
+                        vx: (Math.random() - 0.5) * 4,
+                        vy: (Math.random() - 2) * 3,
+                        life: 30,
+                        color: this.COLORS.particles[Math.floor(Math.random() * this.COLORS.particles.length)]
+                    });
+                }
+            }
+
+            // Update the draw method
+            draw() {
+                // Clear with gradient background
+                const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+                gradient.addColorStop(0, this.COLORS.background);
+                gradient.addColorStop(1, '#000000');
+                ctx.fillStyle = gradient;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                // Draw level with enhanced visuals
+                for(let y = 0; y < ROWS; y++) {
+                    for(let x = 0; x < COLS; x++) {
+                        switch(this.level[y][x]) {
+                            case TILE_BRICK:
+                                this.drawBrick(x, y);
+                                break;
+                            case TILE_LADDER:
+                                this.drawLadder(x, y);
+                                break;
+                            case TILE_ROPE:
+                                this.drawRope(x, y);
+                                break;
+                        }
+
+                        // Enhanced gold drawing
+                        if (this.goldMap[y][x]) {
+                            this.drawGold(x, y);
+                        }
+                    }
+                }
+
+                // Draw particles
+                this.updateAndDrawParticles();
+
+                // Draw digging animations
+                this.updateAndDrawDigging();
+
+                // Draw holes (optional visual effect)
+                this.holes.forEach(hole => {
+                    ctx.fillStyle = '#4B2500';  // Darker brown
+                    ctx.fillRect(
+                        hole.x * GRID_SIZE, 
+                        hole.y * GRID_SIZE, 
+                        GRID_SIZE, 
+                        GRID_SIZE
+                    );
+                });
+
+                // Draw player if alive
+                if (this.player.alive) {
+                    this.drawEntity(this.player, '#4488FF', '#66AAFF');
+                }
+
+                // Draw enemies
+                this.enemies.forEach(enemy => {
+                    this.drawEntity(enemy, '#FF4444', '#FF6666');
+                });
+
+                // Draw lives
+                ctx.fillStyle = 'white';
+                ctx.font = '16px Arial';
+                ctx.fillText(`Lives: ${this.lives}`, 10, 40);
+
+                // Draw death message if waiting for respawn
+                if (this.waitingForRespawn) {
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';  // Semi-transparent black
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    
+                    ctx.fillStyle = 'white';
+                    ctx.font = '24px Arial';
+                    ctx.textAlign = 'center';
+                    const centerX = canvas.width / 2;
+                    const centerY = canvas.height / 2;
+                    
+                    ctx.fillText(`Life lost! ${this.lives} lives remaining`, centerX, centerY - 20);
+                    ctx.fillText('Press SPACE to continue', centerX, centerY + 20);
+                    
+                    ctx.textAlign = 'left';  // Reset text align
+                }
+
+                // Game Over message
+                if (this.lives <= 0) {
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    
+                    ctx.fillStyle = 'white';
+                    ctx.font = '32px Arial';
+                    ctx.textAlign = 'center';
+                    const centerX = canvas.width / 2;
+                    const centerY = canvas.height / 2;
+                    
+                    ctx.fillText('GAME OVER', centerX, centerY - 20);
+                    ctx.fillText('Press R to restart', centerX, centerY + 20);
+                    
+                    ctx.textAlign = 'left';
+                }
+            }
+
+            // New detailed drawing methods
+            drawBrick(x, y) {
+                const brickColor = this.COLORS.brick[Math.floor(y * x) % this.COLORS.brick.length];
+                ctx.fillStyle = brickColor;
+                
+                // Draw main brick
+                ctx.fillRect(x * GRID_SIZE, y * GRID_SIZE, GRID_SIZE, GRID_SIZE);
+                
+                // Draw brick pattern
+                ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(x * GRID_SIZE, y * GRID_SIZE + GRID_SIZE/2);
+                ctx.lineTo((x + 1) * GRID_SIZE, y * GRID_SIZE + GRID_SIZE/2);
+                ctx.moveTo(x * GRID_SIZE, y * GRID_SIZE + GRID_SIZE/2);
+                ctx.lineTo(x * GRID_SIZE, (y + 1) * GRID_SIZE + GRID_SIZE/2);
+                ctx.moveTo((x + 1) * GRID_SIZE, y * GRID_SIZE + GRID_SIZE/2);
+                ctx.lineTo((x + 1) * GRID_SIZE, (y + 1) * GRID_SIZE + GRID_SIZE/2);
+                ctx.moveTo(x * GRID_SIZE, (y + 1) * GRID_SIZE + GRID_SIZE/2);
+                ctx.lineTo((x + 1) * GRID_SIZE, (y + 1) * GRID_SIZE + GRID_SIZE/2);
+                ctx.stroke();
+            }
+
+            drawLadder(x, y) {
+                ctx.fillStyle = this.COLORS.ladder[Math.floor(y * x) % this.COLORS.ladder.length];
+                ctx.fillRect(x * GRID_SIZE, y * GRID_SIZE, GRID_SIZE, GRID_SIZE);
+            }
+
+            drawRope(x, y) {
+                ctx.fillStyle = this.COLORS.rope[Math.floor(y * x) % this.COLORS.rope.length];
+                ctx.fillRect(x * GRID_SIZE, y * GRID_SIZE + GRID_SIZE/2 - 2, GRID_SIZE, 4);
+            }
+
+            drawGold(x, y) {
+                ctx.save();
+                
+                // Use visual position instead of grid position
+                const xPos = x * GRID_SIZE + GRID_SIZE/2;
+                const yPos = y * GRID_SIZE + GRID_SIZE/2;
+                
+                // Gold coin base (darker gold)
+                ctx.fillStyle = '#DAA520';  // Golden rod
+                ctx.beginPath();
+                ctx.arc(
+                    xPos, 
+                    yPos, 
+                    GRID_SIZE/3, 
+                    0, 
+                    Math.PI * 2
+                );
+                ctx.fill();
+
+                // Highlight (lighter gold)
+                ctx.fillStyle = '#FFD700';  // Gold
+                ctx.beginPath();
+                ctx.arc(
+                    xPos - 2, 
+                    yPos - 2, 
+                    GRID_SIZE/4, 
+                    0, 
+                    Math.PI * 2
+                );
+                ctx.fill();
+
+                // Shine effect
+                ctx.fillStyle = '#FFFFFF';
+                ctx.beginPath();
+                ctx.arc(
+                    xPos - 3, 
+                    yPos - 3, 
+                    GRID_SIZE/8, 
+                    0, 
+                    Math.PI * 2
+                );
+                ctx.fill();
+
+                ctx.restore();
+            }
+
+            updateAndDrawParticles() {
+                this.particles = this.particles.filter(particle => {
+                    particle.x += particle.vx;
+                    particle.y += particle.vy;
+                    particle.life--;
+                    if (particle.life > 0) {
+                        ctx.beginPath();
+                        ctx.arc(particle.x, particle.y, 2, 0, Math.PI * 2);
+                        ctx.fillStyle = particle.color;
+                        ctx.fill();
+                        return true;
+                    }
+                    return false;
+                });
+            }
+
+            updateAndDrawDigging() {
+                this.digAnimations = this.digAnimations.filter(animation => {
+                    animation.timer--;
+                    if (animation.timer > 0) {
+                        ctx.beginPath();
+                        ctx.arc(animation.x * GRID_SIZE + GRID_SIZE/2, animation.y * GRID_SIZE + GRID_SIZE/2, 4, 0, Math.PI * 2);
+                        ctx.fillStyle = '#FFD700';
+                        ctx.fill();
+                        return true;
+                    }
+                    return false;
+                });
+            }
+
+            // Add new helper methods
+            isAtDecisionPoint(enemy) {
+                // Check if at a ladder intersection
+                const isAtLadder = this.isOnLadder(enemy);
+                const isAtPlatformEdge = !this.isSolidBelow({x: enemy.x + enemy.direction, y: enemy.y});
+                const canClimbUp = this.level[enemy.y - 1]?.[enemy.x] === TILE_LADDER;
+                const canClimbDown = this.level[enemy.y + 1]?.[enemy.x] === TILE_LADDER;
+                
+                // Decision points are:
+                // 1. At a ladder while moving horizontally
+                // 2. At platform edge
+                // 3. At top or bottom of ladder while moving vertically
+                return (
+                    (enemy.verticalDirection === 0 && (isAtLadder || isAtPlatformEdge)) ||
+                    (enemy.verticalDirection !== 0 && (!canClimbUp || !canClimbDown))
+                );
+            }
+
+            makeEnemyDecision(enemy) {
+                const options = [];
+                
+                // Collect all possible moves
+                if (this.canMoveHorizontally(enemy, 1)) options.push({dir: 1, vert: 0});
+                if (this.canMoveHorizontally(enemy, -1)) options.push({dir: -1, vert: 0});
+                if (this.canMoveVertically(enemy, 1)) options.push({dir: 0, vert: 1});
+                if (this.canMoveVertically(enemy, -1)) options.push({dir: 0, vert: -1});
+                
+                // Remove the option to reverse direction (to prevent back-and-forth movement)
+                // unless it's the only option
+                const filteredOptions = options.filter(opt => 
+                    !(opt.dir === -enemy.direction && opt.vert === 0) &&
+                    !(opt.vert === -enemy.verticalDirection && opt.dir === 0)
+                );
+                
+                const finalOptions = filteredOptions.length > 0 ? filteredOptions : options;
+                
+                // Randomly select from available options
+                if (finalOptions.length > 0) {
+                    const choice = finalOptions[Math.floor(Math.random() * finalOptions.length)];
+                    enemy.direction = choice.dir;
+                    enemy.verticalDirection = choice.vert;
+                    
+                    // Execute the chosen move
+                    if (choice.vert !== 0) {
+                        this.moveVertically(enemy, choice.vert);
+                        enemy.state = this.STATES.CLIMBING;
+                    } else {
+                        this.moveHorizontally(enemy, choice.dir);
+                        enemy.state = this.STATES.STANDING;
+                    }
+                } else {
+                    // If no options available, reverse direction
+                    enemy.direction *= -1;
+                    enemy.verticalDirection = 0;
+                }
+            }
+        }
+
+        // Create game instance
+        const game = new Game();
+
+        // Game loop
+        function gameLoop() {
+            game.update();
+            game.draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Input handling
+        document.addEventListener('keydown', (e) => {
+            game.handleInput(e);
+        });
+
+        // Add reset on R key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'r') {
+                game.reset();
+            }
+        });
+
+        // Start the game
+        gameLoop();
+    </script>
+</body>
+</html>

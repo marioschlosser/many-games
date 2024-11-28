@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pitfall</title>
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #333;
+        }
+        canvas {
+            background-color: #fff;
+            border: 2px solid #000;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="400"></canvas>
+
+    <script>
+        class Pitfall {
+            constructor(canvasId) {
+                this.canvas = document.getElementById(canvasId);
+                this.ctx = this.canvas.getContext('2d');
+                
+                // Game state
+                this.lives = 3;
+                this.score = 0;
+                this.timeRemaining = 20 * 60; // 20 minutes in seconds
+                this.currentScreen = 1;
+                
+                // Player state
+                this.player = {
+                    x: 50,
+                    y: this.canvas.height - 60,
+                    width: 20,
+                    height: 40,
+                    speed: 5,
+                    isJumping: false,
+                    isOnLadder: false,
+                    isOnVine: false,
+                    vineX: 0,  // X position of current vine
+                    vineSwingPhase: 0,  // For vine swinging animation
+                    velocity: { x: 0, y: 0 },
+                    jumpForce: -12,
+                    gravity: 0.6,
+                    maxSpeed: 8,
+                    direction: 1  // 1 for right, -1 for left
+                };
+                
+                // Treasure mapping (screen number -> treasure type)
+                this.treasures = {
+                    18: { type: 'MONEY_BAG', points: 2000, collected: false, x: 400, y: 300 },
+                    30: { type: 'DIAMOND_RING', points: 5000, collected: false, x: 600, y: 300 }
+                    // ... more treasures can be added
+                };
+                
+                // Screen obstacles configuration
+                this.screenConfig = {
+                    1: {
+                        hasLadder: true,
+                        ladderX: 200,
+                        hasUnderground: true,
+                        nextUnderground: 7,
+                        pits: [{ x: 300, width: 100 }]
+                    }
+                    // ... more screen configs
+                };
+                
+                // Track key states
+                this.keys = {
+                    left: false,
+                    right: false,
+                    up: false,
+                    down: false,
+                    space: false
+                };
+                
+                // Add hazard states with animation timers
+                this.hazards = {
+                    alligators: {
+                        mouthOpen: false,
+                        animationTimer: 0,
+                        cycleTime: 180
+                    },
+                    logs: [],
+                    fire: {
+                        animationFrame: 0,
+                        animationTimer: 0,
+                        cycleTime: 30
+                    },
+                    snakes: [],
+                    scorpions: []
+                };
+                
+                this.bindControls();
+                this.gameLoop();
+            }
+            
+            bindControls() {
+                document.addEventListener('keydown', (e) => {
+                    switch(e.key) {
+                        case 'ArrowLeft': this.keys.left = true; break;
+                        case 'ArrowRight': this.keys.right = true; break;
+                        case 'ArrowUp': this.keys.up = true; break;
+                        case 'ArrowDown': this.keys.down = true; break;
+                        case ' ': 
+                            this.keys.space = true;
+                            this.jump();
+                            break;
+                    }
+                });
+
+                document.addEventListener('keyup', (e) => {
+                    switch(e.key) {
+                        case 'ArrowLeft': this.keys.left = false; break;
+                        case 'ArrowRight': this.keys.right = false; break;
+                        case 'ArrowUp': this.keys.up = false; break;
+                        case 'ArrowDown': this.keys.down = false; break;
+                        case ' ': this.keys.space = false; break;
+                    }
+                });
+            }
+            
+            updatePlayer() {
+                if (this.player.isOnLadder) {
+                    // Ladder movement
+                    if (this.keys.up) {
+                        this.player.y -= this.player.speed;
+                        // Check if we've reached the top
+                        if (this.player.y < 100) {
+                            this.player.y = 100;
+                        }
+                    }
+                    if (this.keys.down) {
+                        this.player.y += this.player.speed;
+                        // Check if we've reached the bottom - transition underground
+                        const currentConfig = this.screenConfig[this.currentScreen];
+                        if (currentConfig?.hasUnderground && this.player.y > this.canvas.height - 20) {
+                            this.transitionUnderground();
+                            return;
+                        }
+                    }
+                    
+                    // ... rest of ladder code ...
+                } else if (this.player.isOnVine) {
+                    // Vine swinging physics
+                    this.player.vineSwingPhase += 0.05;  // Controls swing speed
+                    const swingRadius = 60;  // Controls swing width
+                    
+                    // Calculate position based on swing phase
+                    this.player.x = this.player.vineX + Math.sin(this.player.vineSwingPhase) * swingRadius;
+                    this.player.y = this.canvas.height - 160 + Math.abs(Math.cos(this.player.vineSwingPhase)) * 20;
+
+                    // Jump off vine with Space or Down
+                    if (this.keys.space || this.keys.down) {
+                        this.player.isOnVine = false;
+                        this.player.isJumping = true;
+                        this.player.velocity.y = this.player.jumpForce * 0.7;
+                        // Horizontal velocity based on swing phase - gives momentum in swing direction
+                        this.player.velocity.x = Math.cos(this.player.vineSwingPhase) * this.player.maxSpeed;
+                    }
+                } else {
+                    // Normal movement
+                    if (this.keys.left) {
+                        this.player.velocity.x = -this.player.maxSpeed;
+                        this.player.direction = -1;
+                    } else if (this.keys.right) {
+                        this.player.velocity.x = this.player.maxSpeed;
+                        this.player.direction = 1;
+                    } else {
+                        this.player.velocity.x *= 0.8;
+                    }
+
+                    // Check for vine grab - Auto-grab on touch
+                    const currentConfig = this.screenConfig[this.currentScreen];
+                    if (currentConfig?.vines) {
+                        currentConfig.vines.forEach(vine => {
+                            // Auto-grab when near vine and high enough
+                            if (Math.abs(this.player.x - vine.x) < 30 && 
+                                this.player.y < this.canvas.height - 100) {  // Must be high enough
+                                this.player.isOnVine = true;
+                                this.player.vineX = vine.x;
+                                this.player.vineSwingPhase = 0;
+                                this.player.velocity = { x: 0, y: 0 };
+                                // Snap to proper vine height
+                                this.player.y = this.canvas.height - 160;
+                            }
+                        });
+                    }
+
+                    // Check for ladder grab
+                    if (currentConfig?.hasLadder) {
+                        if (Math.abs(this.player.x - currentConfig.ladderX) < 20) {
+                            if ((this.keys.up && this.player.y > 100) || 
+                                (this.keys.down && this.player.y < this.canvas.height - 60)) {
+                                this.player.isOnLadder = true;
+                                this.player.x = currentConfig.ladderX;
+                                this.player.velocity = { x: 0, y: 0 };
+                            }
+                        }
+                    }
+
+                    // Apply movement
+                    if (!this.player.isOnVine) {
+                        this.player.x += this.player.velocity.x;
+                        
+                        if (this.player.isJumping) {
+                            this.player.velocity.y += this.player.gravity;
+                            this.player.y += this.player.velocity.y;
+
+                            // Check for landing
+                            if (this.player.y >= this.canvas.height - 60) {
+                                this.player.y = this.canvas.height - 60;
+                                this.player.isJumping = false;
+                                this.player.velocity.y = 0;
+                            }
+                        }
+                    }
+
+                    // Screen transitions
+                    if (this.player.x < 0) {
+                        if (this.currentScreen > 1) {  // Check if we can go left
+                            this.currentScreen--;
+                            this.player.x = this.canvas.width - 10;
+                            this.loadScreen(this.currentScreen);
+                        } else {
+                            this.player.x = 0;  // Stop at screen boundary
+                        }
+                    } else if (this.player.x > this.canvas.width) {
+                        if (this.currentScreen < 256) {  // Check if we can go right
+                            this.currentScreen++;
+                            this.player.x = 10;
+                            this.loadScreen(this.currentScreen);
+                        } else {
+                            this.player.x = this.canvas.width;  // Stop at screen boundary
+                        }
+                    }
+                }
+            }
+            
+            jump() {
+                if (!this.player.isJumping) {
+                    this.player.isJumping = true;
+                    this.player.velocity.y = this.player.jumpForce;
+                    
+                    // Maintain horizontal momentum during jump
+                    if (this.keys.left) {
+                        this.player.velocity.x = -this.player.maxSpeed;
+                    } else if (this.keys.right) {
+                        this.player.velocity.x = this.player.maxSpeed;
+                    }
+                }
+            }
+            
+            checkCollisions() {
+                // Check treasure collisions
+                if (this.treasures[this.currentScreen] && !this.treasures[this.currentScreen].collected) {
+                    const treasure = this.treasures[this.currentScreen];
+                    // Add width and height to treasure for collision detection
+                    const treasureBox = {
+                        x: treasure.x,
+                        y: treasure.y,
+                        width: 20,
+                        height: 20
+                    };
+                    
+                    if (this.isColliding(this.player, treasureBox)) {
+                        console.log(`Collected ${treasure.type} for ${treasure.points} points!`);
+                        this.score += treasure.points;
+                        treasure.collected = true;
+                    }
+                }
+                
+                // Check pit collisions (regular pits)
+                const currentConfig = this.screenConfig[this.currentScreen];
+                if (currentConfig && currentConfig.pits) {
+                    for (const pit of currentConfig.pits) {
+                        if (this.player.x + this.player.width > pit.x && 
+                            this.player.x < pit.x + pit.width && 
+                            this.player.y + this.player.height >= this.canvas.height - 20) {
+                            this.score -= 100;  // Penalty for falling in pit
+                            this.die();
+                        }
+                    }
+                }
+            }
+            
+            die() {
+                this.lives--;
+                if (this.lives <= 0) {
+                    alert('Game Over!');
+                    location.reload();
+                } else {
+                    // Respawn
+                    this.player.x = 50;
+                    this.player.y = this.canvas.height - 60;
+                    this.player.velocity = { x: 0, y: 0 };
+                    this.player.isJumping = false;
+                }
+            }
+            
+            isColliding(rect1, rect2) {
+                return rect1.x < rect2.x + rect2.width &&
+                       rect1.x + rect1.width > rect2.x &&
+                       rect1.y < rect2.y + rect2.height &&
+                       rect1.y + rect1.height > rect2.y;
+            }
+            
+            render() {
+                // Clear the canvas
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+                
+                // Draw background based on whether we're underground
+                if (this.screenConfig[this.currentScreen]?.isUnderground) {
+                    // Underground background
+                    this.ctx.fillStyle = '#221100';  // Very dark brown
+                    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+                    
+                    // Draw cave ceiling
+                    this.ctx.fillStyle = '#442200';  // Dark brown
+                    this.ctx.fillRect(0, 100, this.canvas.width, 20);
+                    
+                    // Draw cave walls with rough texture
+                    this.ctx.fillStyle = '#663300';  // Brown
+                    for (let y = 120; y < this.canvas.height - 20; y += 40) {
+                        // Left wall
+                        this.ctx.fillRect(0, y, 30 + Math.sin(y * 0.1) * 10, 40);
+                        // Right wall
+                        this.ctx.fillRect(
+                            this.canvas.width - (30 + Math.sin(y * 0.1) * 10), 
+                            y, 
+                            30 + Math.sin(y * 0.1) * 10, 
+                            40
+                        );
+                    }
+                    
+                    // Draw underground floor
+                    this.ctx.fillStyle = '#442200';  // Dark brown
+                    this.ctx.fillRect(0, this.canvas.height - 20, this.canvas.width, 20);
+                    
+                    // Add some stalactites
+                    this.ctx.fillStyle = '#553311';
+                    for (let x = 50; x < this.canvas.width; x += 100) {
+                        this.ctx.beginPath();
+                        this.ctx.moveTo(x, 120);
+                        this.ctx.lineTo(x + 15, 140);
+                        this.ctx.lineTo(x - 15, 140);
+                        this.ctx.fill();
+                    }
+                } else {
+                    // Above ground background
+                    this.ctx.fillStyle = '#87CEEB';  // Sky blue
+                    this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+                    
+                    // Draw ground
+                    this.ctx.fillStyle = '#663300';
+                    this.ctx.fillRect(0, this.canvas.height - 20, this.canvas.width, 20);
+                }
+                
+                // Draw current screen elements
+                this.drawScreenElements();
+                
+                // Draw hazards
+                this.drawHazards();
+                
+                // Draw player
+                this.ctx.fillStyle = '#ff4444';
+                this.ctx.fillRect(this.player.x, this.player.y, this.player.width, this.player.height);
+                
+                // Draw HUD
+                this.drawHUD();
+            }
+            
+            drawScreenElements() {
+                const config = this.screenConfig[this.currentScreen];
+                if (!config) return;
+
+                // Draw ladder - Made more ladder-like
+                if (config.hasLadder) {
+                    // Draw platform at top of ladder
+                    this.ctx.fillStyle = '#663300';  // Same as ground color
+                    this.ctx.fillRect(config.ladderX - 30, 80, 90, 20);  // Platform
+                    
+                    // Draw ladder posts
+                    this.ctx.fillStyle = '#8b4513';  // Brown
+                    this.ctx.fillRect(config.ladderX - 2, 100, 4, this.canvas.height - 120);  // Left post
+                    this.ctx.fillRect(config.ladderX + 28, 100, 4, this.canvas.height - 120);  // Right post
+                    
+                    // Draw rungs with 3D effect
+                    for (let y = 110; y < this.canvas.height - 20; y += 20) {
+                        // Rung shadow
+                        this.ctx.fillStyle = '#654321';  // Darker brown
+                        this.ctx.fillRect(config.ladderX - 5, y + 2, 40, 3);
+                        
+                        // Rung
+                        this.ctx.fillStyle = '#8b4513';  // Brown
+                        this.ctx.fillRect(config.ladderX - 5, y, 40, 3);
+                    }
+
+                    // Draw underground entrance
+                    if (config.hasUnderground) {
+                        // Draw entrance hole
+                        this.ctx.fillStyle = '#000000';
+                        this.ctx.fillRect(config.ladderX - 20, this.canvas.height - 20, 70, 20);
+                        
+                        // Add some depth to the hole
+                        this.ctx.fillStyle = '#1a1a1a';  // Slightly lighter black
+                        this.ctx.fillRect(config.ladderX - 15, this.canvas.height - 15, 60, 5);
+                    }
+                }
+                
+                // Draw pits
+                if (config.pits) {
+                    this.ctx.fillStyle = '#000';
+                    for (const pit of config.pits) {
+                        this.ctx.fillRect(pit.x, this.canvas.height - 20, pit.width, 20);
+                    }
+                }
+                
+                // Draw treasure if it exists on this screen and hasn't been collected
+                const treasure = this.treasures[this.currentScreen];
+                if (treasure && !treasure.collected) {
+                    // Draw treasure based on type
+                    switch(treasure.type) {
+                        case 'DIAMOND_RING':
+                            this.ctx.fillStyle = '#00ffff';  // Cyan for diamond
+                            this.ctx.strokeStyle = '#ffd700'; // Gold for ring
+                            // Draw ring
+                            this.ctx.beginPath();
+                            this.ctx.arc(treasure.x + 10, treasure.y + 10, 8, 0, Math.PI * 2);
+                            this.ctx.stroke();
+                            // Draw diamond
+                            this.ctx.beginPath();
+                            this.ctx.moveTo(treasure.x + 10, treasure.y + 5);
+                            this.ctx.lineTo(treasure.x + 15, treasure.y + 10);
+                            this.ctx.lineTo(treasure.x + 10, treasure.y + 15);
+                            this.ctx.lineTo(treasure.x + 5, treasure.y + 10);
+                            this.ctx.fill();
+                            break;
+                        case 'GOLD':
+                            this.ctx.fillStyle = '#ffd700';  // Gold
+                            this.ctx.fillRect(treasure.x, treasure.y, 20, 20);
+                            // Add shine effect
+                            this.ctx.fillStyle = '#ffffff';
+                            this.ctx.fillRect(treasure.x + 5, treasure.y + 5, 5, 5);
+                            break;
+                        case 'SILVER':
+                            this.ctx.fillStyle = '#c0c0c0';  // Silver
+                            this.ctx.fillRect(treasure.x, treasure.y, 20, 20);
+                            // Add shine effect
+                            this.ctx.fillStyle = '#ffffff';
+                            this.ctx.fillRect(treasure.x + 5, treasure.y + 5, 5, 5);
+                            break;
+                        case 'MONEY_BAG':
+                            this.ctx.fillStyle = '#8b4513';  // Brown bag
+                            // Draw bag
+                            this.ctx.beginPath();
+                            this.ctx.arc(treasure.x + 10, treasure.y + 8, 8, Math.PI, Math.PI * 2);
+                            this.ctx.fillRect(treasure.x + 2, treasure.y + 8, 16, 10);
+                            this.ctx.fill();
+                            // Draw $ symbol
+                            this.ctx.fillStyle = '#ffd700';
+                            this.ctx.font = '12px Arial';
+                            this.ctx.fillText('$', treasure.x + 7, treasure.y + 15);
+                            break;
+                    }
+                }
+
+                // Draw vines with animation
+                if (config.vines) {
+                    config.vines.forEach(vine => {
+                        // Calculate vine angle based on player swing
+                        let vineEndX = vine.x;
+                        if (this.player.isOnVine && this.player.vineX === vine.x) {
+                            vineEndX = this.player.x;  // Vine ends at player position when swinging
+                        }
+
+                        // Draw straight vine rope
+                        this.ctx.strokeStyle = '#228B22';  // Forest green
+                        this.ctx.lineWidth = 3;
+                        this.ctx.beginPath();
+                        this.ctx.moveTo(vine.x, 0);  // Start from top
+                        this.ctx.lineTo(vineEndX, this.canvas.height - 160);  // End at swing height
+                        this.ctx.stroke();
+
+                        // Draw leaves at top
+                        this.ctx.fillStyle = '#32CD32';  // Lime green
+                        for (let i = 0; i < 3; i++) {
+                            this.ctx.beginPath();
+                            this.ctx.ellipse(
+                                vine.x - 10 + (i * 10), 
+                                20, 
+                                8, 15, 0, 0, Math.PI * 2
+                            );
+                            this.ctx.fill();
+                        }
+                    });
+                }
+            }
+            
+            drawHUD() {
+                this.ctx.fillStyle = '#000';
+                this.ctx.font = '20px Arial';
+                this.ctx.fillText(`Score: ${this.score}`, 10, 30);
+                this.ctx.fillText(`Lives: ${this.lives}`, 10, 60);
+                
+                // Format time to show MM:SS
+                const minutes = Math.floor(this.timeRemaining / 60);
+                const seconds = Math.floor(this.timeRemaining % 60);
+                const timeString = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+                this.ctx.fillText(`Time: ${timeString}`, 10, 90);
+                
+                this.ctx.fillText(`Screen: ${this.currentScreen}`, 10, 120);
+            }
+            
+            gameLoop() {
+                if (this.timeRemaining > 0) {
+                    this.timeRemaining -= 1/60;
+                    this.updatePlayer();
+                    this.updateHazards();  // Make sure this is being called!
+                    this.checkCollisions();
+                    this.checkHazardCollisions();
+                    this.render();
+                    requestAnimationFrame(() => this.gameLoop());
+                } else {
+                    alert('Time is up!');
+                    location.reload();
+                }
+            }
+
+            loadScreen(screenNumber) {
+                console.log(`Loading screen ${screenNumber}`);
+                // Validate screen number
+                if (screenNumber < 1 || screenNumber > 256) {
+                    return;
+                }
+
+                // Special screen configurations including underground connections
+                const specialScreens = {
+                    1: {
+                        hasLadder: true,
+                        ladderX: 200,
+                        hasUnderground: true,
+                        nextUnderground: 7,  // This ladder leads to screen 7
+                        vines: [{ x: 400 }],
+                        hazards: {
+                            alligatorPits: [],
+                            logs: [{ x: 300, speed: 2, width: 80, height: 30 }]
+                        }
+                    },
+                    7: {  // Underground destination from screen 1
+                        isUnderground: true,
+                        hazards: {}
+                    },
+                    21: {
+                        hasLadder: true,
+                        ladderX: 300,
+                        hasUnderground: true,
+                        nextUnderground: 30,
+                        hazards: {}
+                    },
+                    30: {  // Underground destination from screen 21
+                        isUnderground: true,
+                        hazards: {}
+                    },
+                    31: {  // The trap
+                        isUnderground: true,
+                        hazards: {}
+                    }
+                };
+
+                // Use special screen config if it exists
+                if (specialScreens[screenNumber]) {
+                    this.screenConfig[screenNumber] = specialScreens[screenNumber];
+                } else {
+                    // For non-special screens, generate random layout
+                    this.screenConfig[screenNumber] = {
+                        isUnderground: false,  // Most screens are above ground
+                        hazards: {
+                            alligatorPits: Math.random() < 0.2 ? [{ x: 300, width: 200, alligators: 3 }] : [],
+                            fire: Math.random() < 0.2 ? [{ x: 400, width: 40 }] : [],
+                            snakes: Math.random() < 0.2 ? [{ x: 200, direction: 1 }] : [],
+                            scorpions: Math.random() < 0.2 ? [{ x: 400, direction: -1 }] : []
+                        },
+                        vines: Math.random() < 0.3 ? [{ x: 200 + Math.random() * 400 }] : []
+                    };
+                }
+
+                console.log(`Screen ${screenNumber} config:`, this.screenConfig[screenNumber]);
+
+                // Add treasures for specific screens
+                const treasureLocations = {
+                    18: { type: 'MONEY_BAG', points: 2000, x: 400, y: 300 },
+                    30: { type: 'DIAMOND_RING', points: 5000, x: 600, y: 300 },
+                    45: { type: 'GOLD', points: 4000, x: 300, y: 300 },
+                    62: { type: 'SILVER', points: 3000, x: 500, y: 300 }
+                    // Add more treasure locations from the walkthrough
+                };
+
+                if (treasureLocations[screenNumber]) {
+                    this.treasures[screenNumber] = {
+                        ...treasureLocations[screenNumber],
+                        collected: false
+                    };
+                }
+            }
+
+            updateHazards() {
+                // Update alligator mouth animation
+                this.hazards.alligators.animationTimer++;
+                if (this.hazards.alligators.animationTimer >= this.hazards.alligators.cycleTime) {
+                    this.hazards.alligators.mouthOpen = !this.hazards.alligators.mouthOpen;
+                    this.hazards.alligators.animationTimer = 0;
+                }
+
+                // Update fire animation
+                this.hazards.fire.animationTimer++;
+                if (this.hazards.fire.animationTimer >= this.hazards.fire.cycleTime) {
+                    this.hazards.fire.animationFrame = (this.hazards.fire.animationFrame + 1) % 4;
+                    this.hazards.fire.animationTimer = 0;
+                }
+
+                // Update snake and scorpion positions
+                const currentConfig = this.screenConfig[this.currentScreen];
+                if (currentConfig?.hazards) {
+                    // Move snakes
+                    currentConfig.hazards.snakes?.forEach(snake => {
+                        snake.x += snake.direction;
+                        if (snake.x > this.canvas.width) {
+                            snake.x = -snake.width;
+                        } else if (snake.x < -snake.width) {
+                            snake.x = this.canvas.width;
+                        }
+                    });
+
+                    // Move scorpions
+                    currentConfig.hazards.scorpions?.forEach(scorpion => {
+                        scorpion.x += scorpion.direction;
+                        if (scorpion.x > this.canvas.width) {
+                            scorpion.x = -scorpion.width;
+                        } else if (scorpion.x < -scorpion.width) {
+                            scorpion.x = this.canvas.width;
+                        }
+                    });
+                }
+            }
+
+            checkHazardCollisions() {
+                const currentConfig = this.screenConfig[this.currentScreen];
+                if (!currentConfig?.hazards) return;
+
+                // Check alligator pit collisions
+                currentConfig.hazards.alligatorPits?.forEach(pit => {
+                    // Only check if player is within pit's x bounds and at ground level
+                    if (this.player.x + this.player.width > pit.x && 
+                        this.player.x < pit.x + pit.width && 
+                        this.player.y + this.player.height >= this.canvas.height - 20) {
+                        
+                        const alligatorWidth = pit.width / pit.alligators;
+                        const playerCenter = this.player.x + (this.player.width / 2) - pit.x;
+                        const alligatorIndex = Math.floor(playerCenter / alligatorWidth);
+                        
+                        // Check if player is on alligator head (safe spot)
+                        const relativeX = playerCenter % alligatorWidth;
+                        const centerX = alligatorWidth / 2;
+                        const headWidth = alligatorWidth * 0.3;  // Head is 30% of alligator width
+                        
+                        // Player is safe if:
+                        // 1. On a closed mouth OR
+                        // 2. On the edges of the head (even with open mouth)
+                        const onHeadEdge = Math.abs(relativeX - centerX) > (alligatorWidth * 0.2);
+                        const isSafe = !this.hazards.alligators.mouthOpen || onHeadEdge;
+                        
+                        if (!isSafe) {
+                            this.die();
+                        }
+                    }
+                });
+
+                // Check fire collisions
+                currentConfig.hazards.fire?.forEach(fire => {
+                    if (this.player.x + this.player.width > fire.x &&
+                        this.player.x < fire.x + fire.width &&
+                        this.player.y + this.player.height > this.canvas.height - 60) {  // Fire height is 40px
+                        console.log('Fire collision!');
+                        this.die();
+                    }
+                });
+
+                // Check snake collisions
+                currentConfig.hazards.snakes?.forEach(snake => {
+                    if (this.player.x + this.player.width > snake.x &&
+                        this.player.x < snake.x + 50 &&  // Snake width is 50px
+                        this.player.y + this.player.height > this.canvas.height - 40) {  // Snake height is 20px
+                        console.log('Snake collision!');
+                        this.die();
+                    }
+                });
+
+                // Check scorpion collisions
+                currentConfig.hazards.scorpions?.forEach(scorpion => {
+                    if (this.player.x + this.player.width > scorpion.x &&
+                        this.player.x < scorpion.x + 40 &&  // Scorpion width is 40px
+                        this.player.y + this.player.height > this.canvas.height - 40) {  // Scorpion height is 20px
+                        console.log('Scorpion collision!');
+                        this.die();
+                    }
+                });
+
+                // Check log collisions
+                this.hazards.logs.forEach(log => {
+                    if (this.isColliding(this.player, log)) {
+                        this.score -= 1; // Deduct points while touching log
+                        if (!this.player.isJumping) {  // Only die if not jumping over the log
+                            this.die();
+                        }
+                    }
+                });
+            }
+
+            drawHazards() {
+                const currentConfig = this.screenConfig[this.currentScreen];
+                if (!currentConfig?.hazards) return;
+
+                // Draw alligator pits
+                currentConfig.hazards.alligatorPits?.forEach(pit => {
+                    // Draw the pit edges
+                    this.ctx.fillStyle = '#663300';  // Brown
+                    this.ctx.fillRect(pit.x - 10, this.canvas.height - 20, 10, 20);  // Left edge
+                    this.ctx.fillRect(pit.x + pit.width, this.canvas.height - 20, 10, 20);  // Right edge
+                    
+                    // Draw water
+                    this.ctx.fillStyle = '#4444ff';  // Blue
+                    this.ctx.fillRect(pit.x, this.canvas.height - 20, pit.width, 20);
+                    
+                    // Draw alligators with more space between them
+                    const alligatorWidth = pit.width / pit.alligators;
+                    for (let i = 0; i < pit.alligators; i++) {
+                        const x = pit.x + (i * alligatorWidth);
+                        this.drawAlligator(x, this.canvas.height - 20, alligatorWidth);
+                    }
+                });
+
+                // Draw fire - Simplified and more visible
+                currentConfig.hazards.fire?.forEach(fire => {
+                    // Base fire shape
+                    this.ctx.fillStyle = '#FF4500';  // Orange-Red
+                    this.ctx.fillRect(fire.x, this.canvas.height - 60, fire.width, 40);
+                    
+                    // Animated flame top
+                    this.ctx.fillStyle = '#FFD700';  // Gold
+                    const flameHeight = 10 + Math.sin(this.hazards.fire.animationTimer * 0.2) * 5;
+                    this.ctx.fillRect(fire.x, this.canvas.height - 60 - flameHeight, fire.width, flameHeight);
+                });
+
+                // Draw scorpions - Bigger and more visible
+                currentConfig.hazards.scorpions?.forEach(scorpion => {
+                    // Body
+                    this.ctx.fillStyle = '#8B4513';  // Saddle brown
+                    this.ctx.fillRect(scorpion.x, this.canvas.height - 40, 40, 20);
+                    
+                    // Claws
+                    this.ctx.fillStyle = '#A0522D';  // Sienna
+                    this.ctx.fillRect(
+                        scorpion.x + (scorpion.direction > 0 ? 40 : -10), 
+                        this.canvas.height - 35, 
+                        10, 
+                        10
+                    );
+                    
+                    // Tail
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(
+                        scorpion.x + (scorpion.direction > 0 ? 30 : 10), 
+                        this.canvas.height - 40
+                    );
+                    this.ctx.lineTo(
+                        scorpion.x + (scorpion.direction > 0 ? 40 : 0), 
+                        this.canvas.height - 50
+                    );
+                    this.ctx.strokeStyle = '#8B4513';
+                    this.ctx.lineWidth = 3;
+                    this.ctx.stroke();
+                });
+
+                // Draw snakes - Bigger and more visible
+                currentConfig.hazards.snakes?.forEach(snake => {
+                    // Snake body
+                    this.ctx.fillStyle = '#228B22';  // Forest Green
+                    this.ctx.fillRect(snake.x, this.canvas.height - 40, 50, 20);
+                    
+                    // Snake head
+                    this.ctx.fillStyle = '#006400';  // Dark Green
+                    this.ctx.fillRect(
+                        snake.x + (snake.direction > 0 ? 50 : -10), 
+                        this.canvas.height - 35, 
+                        10, 
+                        10
+                    );
+                });
+
+                // Draw logs
+                this.hazards.logs.forEach(log => {
+                    // Draw the main log body
+                    this.ctx.fillStyle = '#8b4513';  // Dark brown
+                    this.ctx.fillRect(log.x, log.y, log.width, log.height);
+                    
+                    // Add some wood grain details
+                    this.ctx.fillStyle = '#654321';  // Darker brown
+                    this.ctx.fillRect(log.x + 5, log.y, 2, log.height);
+                    this.ctx.fillRect(log.x + log.width - 7, log.y, 2, log.height);
+                    this.ctx.fillRect(log.x + log.width/2, log.y, 2, log.height);
+                });
+            }
+
+            drawAlligator(x, y, width) {
+                const headWidth = width * 0.3;  // Head is 30% of alligator width
+                const bodyWidth = width * 0.8;  // Body is 80% of total width to create gaps
+                const centerX = x + width/2;    // Center point of alligator space
+                
+                // Draw alligator body
+                this.ctx.fillStyle = '#228B22';  // Green
+                
+                if (this.hazards.alligators.mouthOpen) {
+                    // Draw open mouth (triangle shape)
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(centerX - headWidth, y);  // Left base
+                    this.ctx.lineTo(centerX, y - 20);         // Top point
+                    this.ctx.lineTo(centerX + headWidth, y);  // Right base
+                    this.ctx.closePath();
+                    this.ctx.fill();
+                    
+                    // Draw red inside mouth
+                    this.ctx.fillStyle = '#ff0000';
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(centerX - headWidth/2, y - 5);
+                    this.ctx.lineTo(centerX, y - 15);
+                    this.ctx.lineTo(centerX + headWidth/2, y - 5);
+                    this.ctx.closePath();
+                    this.ctx.fill();
+
+                    // Draw "DANGER" text
+                    this.ctx.fillStyle = 'white';
+                    this.ctx.font = '10px Arial';
+                    this.ctx.fillText('DANGER', centerX - 20, y - 5);
+                } else {
+                    // Draw closed mouth (flat platform)
+                    this.ctx.fillStyle = '#32CD32';  // Lighter green for safe platform
+                    this.ctx.fillRect(centerX - headWidth, y - 10, headWidth * 2, 10);
+                    
+                    // Draw "SAFE" text
+                    this.ctx.fillStyle = 'white';
+                    this.ctx.font = '10px Arial';
+                    this.ctx.fillText('SAFE', centerX - 15, y - 2);
+                }
+            }
+
+            // Add this debug method
+            drawDebugInfo() {
+                this.ctx.fillStyle = '#000';
+                this.ctx.font = '12px Arial';
+                const config = this.screenConfig[this.currentScreen];
+                if (config?.hazards) {
+                    this.ctx.fillText(`Fire: ${config.hazards.fire?.length || 0}`, 200, 30);
+                    this.ctx.fillText(`Snakes: ${config.hazards.snakes?.length || 0}`, 200, 50);
+                    this.ctx.fillText(`Scorpions: ${config.hazards.scorpions?.length || 0}`, 200, 70);
+                    this.ctx.fillText(`Screen: ${this.currentScreen}`, 200, 90);
+                }
+            }
+
+            transitionUnderground() {
+                const currentConfig = this.screenConfig[this.currentScreen];
+                if (!currentConfig?.hasUnderground) return;
+
+                // Jump to the next underground screen
+                this.currentScreen = currentConfig.nextUnderground;
+                
+                // Reset player position at top of new screen
+                this.player.isOnLadder = false;
+                this.player.x = 50;
+                this.player.y = this.canvas.height - 60;
+                
+                // Load the new screen
+                this.loadScreen(this.currentScreen);
+                
+                console.log(`Transitioned underground to screen ${this.currentScreen}`);
+            }
+        }
+
+        // Initialize game when page loads
+        window.onload = () => {
+            const game = new Pitfall('gameCanvas');
+        };
+    </script>
+</body>
+</html>

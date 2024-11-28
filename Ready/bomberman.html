@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Simple Bomberman</title>
+    <style>
+        canvas {
+            border: 1px solid black;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="480" height="480"></canvas>
+    <script>
+        class Game {
+            constructor() {
+                this.canvas = document.getElementById('gameCanvas');
+                this.ctx = this.canvas.getContext('2d');
+                this.tileSize = 30;
+                this.gridSize = 16;
+                
+                // Initialize keys object
+                this.keys = {
+                    ArrowUp: false,
+                    ArrowDown: false,
+                    ArrowLeft: false,
+                    ArrowRight: false
+                };
+                
+                this.player = {
+                    x: 1,
+                    y: 1,
+                    speed: 0.1,
+                    bombs: 1,
+                    fireRange: 1,
+                    canDetonateManually: false,
+                    canWalkThroughBombs: false,
+                    canWalkThroughWalls: false,
+                    isInvincible: false,
+                    isFlameProof: false,
+                    mysteryTimer: 0
+                };
+
+                this.bombs = [];
+                this.explosions = [];
+                this.enemies = [];
+                this.powerups = [];
+                this.message = "";
+                this.messageTimer = 0;
+                
+                this.grid = this.generateLevel();
+                this.setupInputs();
+                this.spawnEnemies(1);
+                
+                this.gameLoop = this.gameLoop.bind(this);
+                requestAnimationFrame(this.gameLoop);
+            }
+
+            generateLevel() {
+                let grid = Array(this.gridSize).fill().map(() => Array(this.gridSize).fill(0));
+                
+                // Set borders
+                for (let i = 0; i < this.gridSize; i++) {
+                    grid[0][i] = 2;
+                    grid[this.gridSize-1][i] = 2;
+                    grid[i][0] = 2;
+                    grid[i][this.gridSize-1] = 2;
+                }
+
+                // Add random destructible blocks
+                for (let y = 2; y < this.gridSize-1; y++) {
+                    for (let x = 2; x < this.gridSize-1; x++) {
+                        if (Math.random() < 0.4) {
+                            grid[y][x] = 1;
+                        }
+                    }
+                }
+
+                // Clear player starting position
+                grid[1][1] = 0;
+                grid[1][2] = 0;
+                grid[2][1] = 0;
+
+                return grid;
+            }
+
+            spawnEnemies(level) {
+                // Level 1: 6 Valcoms (simplest enemies)
+                if (level === 1) {
+                    for (let i = 0; i < 6; i++) {
+                        this.enemies.push({
+                            x: this.gridSize - 2,
+                            y: this.gridSize - 2,
+                            type: 'valcom',
+                            speed: 0.5,
+                            direction: Math.floor(Math.random() * 4),
+                            moveTimer: 0
+                        });
+                    }
+                }
+            }
+
+            setupInputs() {
+                document.addEventListener('keydown', (e) => {
+                    if (this.keys.hasOwnProperty(e.key)) {
+                        this.keys[e.key] = true;
+                    }
+                    if (e.key === ' ') {
+                        this.placeBomb();
+                    }
+                });
+
+                document.addEventListener('keyup', (e) => {
+                    if (this.keys.hasOwnProperty(e.key)) {
+                        this.keys[e.key] = false;
+                    }
+                });
+            }
+
+            canMove(x, y) {
+                // Check each corner of the player's hitbox
+                const corners = [
+                    [x, y],                    // Top-left
+                    [x + 0.9, y],             // Top-right
+                    [x, y + 0.9],             // Bottom-left
+                    [x + 0.9, y + 0.9]        // Bottom-right
+                ];
+
+                for (const [cornerX, cornerY] of corners) {
+                    const gridX = Math.floor(cornerX);
+                    const gridY = Math.floor(cornerY);
+                    
+                    // Check boundaries
+                    if (gridX < 0 || gridX >= this.gridSize || gridY < 0 || gridY >= this.gridSize) {
+                        return false;
+                    }
+                    
+                    // Check walls and blocks
+                    if (this.grid[gridY][gridX] === 2) {
+                        return false; // Hard walls always block
+                    }
+                    
+                    if (this.grid[gridY][gridX] === 1 && !this.player.canWalkThroughWalls) {
+                        return false; // Destructible blocks block unless we have wallwalk
+                    }
+                }
+                
+                // Check for powerup collection
+                const centerGridX = Math.floor(x + 0.5);
+                const centerGridY = Math.floor(y + 0.5);
+                this.powerups.forEach((powerup, index) => {
+                    if (powerup.x === centerGridX && powerup.y === centerGridY) {
+                        this.collectPowerup(powerup);
+                        this.powerups.splice(index, 1);
+                    }
+                });
+                
+                return true;
+            }
+
+            placeBomb() {
+                if (this.bombs.length < this.player.bombs) {
+                    const bombX = Math.floor(this.player.x);
+                    const bombY = Math.floor(this.player.y);
+                    
+                    // Check if bomb already exists at this position
+                    if (!this.bombs.some(bomb => bomb.x === bombX && bomb.y === bombY)) {
+                        this.bombs.push({
+                            x: bombX,
+                            y: bombY,
+                            timer: 3000,
+                            range: this.player.fireRange
+                        });
+                    }
+                }
+            }
+
+            gameLoop(timestamp) {
+                this.update();
+                this.draw();
+                requestAnimationFrame(this.gameLoop);
+            }
+
+            update() {
+                // Handle continuous movement
+                let newX = this.player.x;
+                let newY = this.player.y;
+
+                if (this.keys.ArrowUp) newY -= this.player.speed;
+                if (this.keys.ArrowDown) newY += this.player.speed;
+                if (this.keys.ArrowLeft) newX -= this.player.speed;
+                if (this.keys.ArrowRight) newX += this.player.speed;
+
+                // Check if new position is valid
+                if (this.canMove(newX, newY)) {
+                    this.player.x = newX;
+                    this.player.y = newY;
+                } else {
+                    // Allow sliding along walls
+                    if (this.canMove(this.player.x, newY)) {
+                        this.player.y = newY;
+                    }
+                    if (this.canMove(newX, this.player.y)) {
+                        this.player.x = newX;
+                    }
+                }
+
+                // Check for collision with explosions
+                if (!this.player.isInvincible && !this.player.isFlameProof) {
+                    this.explosions.forEach(explosion => {
+                        if (Math.floor(this.player.x) === explosion.x && 
+                            Math.floor(this.player.y) === explosion.y) {
+                            this.playerDeath();
+                        }
+                    });
+                }
+
+                // Check for collision with enemies
+                if (!this.player.isInvincible) {
+                    this.enemies.forEach(enemy => {
+                        const dx = Math.abs(this.player.x - enemy.x);
+                        const dy = Math.abs(this.player.y - enemy.y);
+                        if (dx < 0.8 && dy < 0.8) {  // Using 0.8 for more forgiving collision
+                            this.playerDeath();
+                        }
+                    });
+                }
+
+                // Update mystery powerup timer
+                if (this.player.mysteryTimer > 0) {
+                    this.player.mysteryTimer -= 16;
+                    if (this.player.mysteryTimer <= 0) {
+                        this.player.isInvincible = false;
+                    }
+                }
+
+                // Update bombs
+                this.bombs.forEach((bomb, index) => {
+                    bomb.timer -= 16;
+                    if (bomb.timer <= 0) {
+                        this.explodeBomb(bomb);
+                        this.bombs.splice(index, 1);
+                    }
+                });
+
+                // Update enemies
+                this.enemies.forEach(enemy => {
+                    enemy.moveTimer += 16;
+                    if (enemy.moveTimer >= 500) {
+                        enemy.moveTimer = 0;
+                        
+                        // Simple AI: randomly change direction or continue
+                        if (Math.random() < 0.2) {
+                            enemy.direction = Math.floor(Math.random() * 4);
+                        }
+                        
+                        const moves = [
+                            {dx: 0, dy: -enemy.speed},
+                            {dx: 0, dy: enemy.speed},
+                            {dx: -enemy.speed, dy: 0},
+                            {dx: enemy.speed, dy: 0}
+                        ];
+                        
+                        const move = moves[enemy.direction];
+                        const newX = enemy.x + move.dx;
+                        const newY = enemy.y + move.dy;
+                        
+                        if (this.canMove(newX, newY)) {
+                            enemy.x = newX;
+                            enemy.y = newY;
+                        } else {
+                            // If can't move, choose a new random direction
+                            enemy.direction = Math.floor(Math.random() * 4);
+                        }
+                    }
+                });
+
+                // Update explosions
+                this.explosions.forEach((explosion, index) => {
+                    explosion.timer -= 16;
+                    if (explosion.timer <= 0) {
+                        this.explosions.splice(index, 1);
+                    }
+                });
+
+                // Update message timer
+                if (this.messageTimer > 0) {
+                    this.messageTimer -= 16;
+                }
+            }
+
+            draw() {
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+
+                // Draw grid
+                for (let y = 0; y < this.gridSize; y++) {
+                    for (let x = 0; x < this.gridSize; x++) {
+                        const tile = this.grid[y][x];
+                        if (tile === 1) {
+                            this.ctx.fillStyle = 'brown';
+                            this.ctx.fillRect(
+                                x * this.tileSize,
+                                y * this.tileSize,
+                                this.tileSize,
+                                this.tileSize
+                            );
+                        } else if (tile === 2) {
+                            this.ctx.fillStyle = 'gray';
+                            this.ctx.fillRect(
+                                x * this.tileSize,
+                                y * this.tileSize,
+                                this.tileSize,
+                                this.tileSize
+                            );
+                        }
+                    }
+                }
+
+                // Draw powerups BEFORE bombs and player
+                this.powerups.forEach(powerup => {
+                    this.ctx.fillStyle = this.getPowerupColor(powerup.type);
+                    this.ctx.fillRect(
+                        powerup.x * this.tileSize + this.tileSize/4,
+                        powerup.y * this.tileSize + this.tileSize/4,
+                        this.tileSize/2,
+                        this.tileSize/2
+                    );
+                });
+
+                // Draw bombs
+                this.bombs.forEach(bomb => {
+                    this.ctx.fillStyle = 'black';
+                    this.ctx.beginPath();
+                    this.ctx.arc(
+                        bomb.x * this.tileSize + this.tileSize/2,
+                        bomb.y * this.tileSize + this.tileSize/2,
+                        this.tileSize/3,
+                        0,
+                        Math.PI * 2
+                    );
+                    this.ctx.fill();
+                });
+
+                // Draw explosions
+                this.explosions.forEach(explosion => {
+                    this.ctx.fillStyle = 'orange';
+                    this.ctx.fillRect(
+                        explosion.x * this.tileSize,
+                        explosion.y * this.tileSize,
+                        this.tileSize,
+                        this.tileSize
+                    );
+                });
+
+                // Draw player
+                this.ctx.fillStyle = 'blue';
+                this.ctx.fillRect(
+                    this.player.x * this.tileSize,
+                    this.player.y * this.tileSize,
+                    this.tileSize,
+                    this.tileSize
+                );
+
+                // Draw enemies
+                this.enemies.forEach(enemy => {
+                    this.ctx.fillStyle = 'red';
+                    this.ctx.beginPath();
+                    this.ctx.arc(
+                        enemy.x * this.tileSize + this.tileSize/2,
+                        enemy.y * this.tileSize + this.tileSize/2,
+                        this.tileSize/3,
+                        0,
+                        Math.PI * 2
+                    );
+                    this.ctx.fill();
+                });
+
+                // Draw message if timer is active
+                if (this.messageTimer > 0) {
+                    this.ctx.fillStyle = 'white';
+                    this.ctx.font = '20px Arial';
+                    this.ctx.textAlign = 'center';
+                    this.ctx.fillText(this.message, this.canvas.width/2, 30);
+                }
+            }
+
+            explodeBomb(bomb) {
+                // Create explosions in four directions
+                const directions = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+                const explosionCells = []; // Track all explosion coordinates
+                
+                // Add center explosion
+                this.explosions.push({
+                    x: bomb.x,
+                    y: bomb.y,
+                    timer: 500
+                });
+                explosionCells.push({x: bomb.x, y: bomb.y});
+                
+                directions.forEach(([dx, dy]) => {
+                    for (let i = 1; i <= bomb.range; i++) {
+                        const x = bomb.x + (dx * i);
+                        const y = bomb.y + (dy * i);
+                        
+                        if (x < 0 || x >= this.gridSize || y < 0 || y >= this.gridSize) break;
+                        if (this.grid[y][x] === 2) break;
+                        
+                        this.explosions.push({
+                            x: x,
+                            y: y,
+                            timer: 500
+                        });
+                        explosionCells.push({x, y});
+                        
+                        if (this.grid[y][x] === 1) {
+                            this.grid[y][x] = 0;
+                            if (Math.random() < 0.4) {
+                                if (!this.hasLevelPowerupSpawned) {
+                                    this.spawnPowerup(x, y, this.getLevelPowerup());
+                                    this.hasLevelPowerupSpawned = true;
+                                } else {
+                                    this.spawnPowerup(x, y, this.getRandomPowerup());
+                                }
+                            }
+                            break;
+                        }
+                    }
+                });
+
+                // Check for enemy kills
+                this.enemies = this.enemies.filter(enemy => {
+                    const enemyGridX = Math.floor(enemy.x);
+                    const enemyGridY = Math.floor(enemy.y);
+                    return !explosionCells.some(cell => 
+                        cell.x === enemyGridX && cell.y === enemyGridY
+                    );
+                });
+            }
+
+            spawnPowerup(x, y, type) {
+                console.log('Spawning powerup:', type, 'at', x, y); // Debug log
+                this.powerups.push({
+                    x: x,
+                    y: y,
+                    type: type
+                });
+            }
+
+            getPowerupColor(type) {
+                const colors = {
+                    'bomb': 'black',
+                    'fire': 'red',
+                    'detonator': 'pink',
+                    'speedup': 'yellow',
+                    'bombwalk': 'purple',
+                    'wallwalk': 'brown',
+                    'mystery': 'white',
+                    'flameproof': 'green'
+                };
+                return colors[type] || 'white';
+            }
+
+            getRandomPowerup() {
+                const powerups = [
+                    'bomb',
+                    'fire',
+                    'detonator',
+                    'speedup',
+                    'bombwalk',
+                    'wallwalk',
+                    'mystery',
+                    'flameproof'
+                ];
+                return powerups[Math.floor(Math.random() * powerups.length)];
+            }
+
+            getLevelPowerup() {
+                const levelPowerups = {
+                    1: 'fire',
+                    2: 'bomb',
+                    3: 'detonator',
+                    4: 'speedup',
+                    5: 'bomb',
+                    // ... add more levels as needed
+                };
+                return levelPowerups[this.currentLevel] || this.getRandomPowerup();
+            }
+
+            collectPowerup(powerup) {
+                let message = "";
+                
+                switch(powerup.type) {
+                    case 'bomb':
+                        if (this.player.bombs < 10) this.player.bombs++;
+                        message = `Bomb (Can now place ${this.player.bombs} bombs)`;
+                        break;
+                    case 'fire':
+                        if (this.player.fireRange < 5) this.player.fireRange++;
+                        message = `Fire (Bomb range increased to ${this.player.fireRange})`;
+                        break;
+                    case 'detonator':
+                        this.player.canDetonateManually = true;
+                        message = "Detonator (Press B to detonate bombs)";
+                        break;
+                    case 'speedup':
+                        this.player.speed = 2;
+                        message = "Speed Up (Movement speed doubled)";
+                        break;
+                    case 'bombwalk':
+                        this.player.canWalkThroughBombs = true;
+                        message = "Bomb Walk (Can walk through bombs)";
+                        break;
+                    case 'wallwalk':
+                        this.player.canWalkThroughWalls = true;
+                        message = "Wall Walk (Can walk through bricks)";
+                        break;
+                    case 'mystery':
+                        this.player.isInvincible = true;
+                        this.player.mysteryTimer = 35000;
+                        message = "Mystery (35 seconds of invincibility)";
+                        break;
+                    case 'flameproof':
+                        this.player.isFlameProof = true;
+                        message = "Flame Proof (Immune to bomb explosions)";
+                        break;
+                }
+                
+                // Set message and timer
+                this.message = message;
+                this.messageTimer = 3000; // Show message for 3 seconds
+            }
+
+            playerDeath() {
+                // Reset player position
+                this.player.x = 1;
+                this.player.y = 1;
+                
+                // Reset powerups
+                this.player.speed = 0.1;
+                this.player.bombs = 1;
+                this.player.fireRange = 1;
+                this.player.canDetonateManually = false;
+                this.player.canWalkThroughBombs = false;
+                this.player.canWalkThroughWalls = false;
+                this.player.isInvincible = false;
+                this.player.isFlameProof = false;
+                
+                // Show death message
+                this.message = "You died!";
+                this.messageTimer = 3000;
+            }
+        }
+        
+        new Game();
+    </script>
+</body>
+</html>

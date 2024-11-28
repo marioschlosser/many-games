@@ -1,0 +1,1931 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Rampage Clone</title>
+    <style>
+        canvas {
+            border: 1px solid black;
+            display: block;
+            margin: 0 auto;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+    // Constants
+    const CANVAS_WIDTH = 800;
+    const CANVAS_HEIGHT = 600;
+    const GROUND_Y = CANVAS_HEIGHT * 0.8;
+    
+    // Add physics constants
+    const GRAVITY = 0.5;
+    const JUMP_FORCE = -10;
+    const MOVE_SPEED = 2;
+    const FRICTION = 0.8;
+    const WINDOW_WIDTH = 40;
+    const WINDOW_HEIGHT = 40;
+    const WINDOW_HEALTH = 2;  // Number of hits to break a window
+    const CLIMB_ZONE_WIDTH = 40;  // Width of zone where climbing is possible
+
+    // Add keyboard state tracking
+    const keys = {
+        left: false,
+        right: false,
+        up: false,
+        down: false,
+        space: false,
+        x: false
+    };
+
+    // Add keyboard event listeners
+    document.addEventListener('keydown', (e) => {
+        switch(e.key) {
+            case 'ArrowLeft': keys.left = true; break;
+            case 'ArrowRight': keys.right = true; break;
+            case 'ArrowUp': keys.up = true; break;
+            case 'ArrowDown': keys.down = true; break;
+            case ' ': keys.space = true; break;
+            case 'x': keys.x = true; break;
+        }
+    });
+
+    document.addEventListener('keyup', (e) => {
+        switch(e.key) {
+            case 'ArrowLeft': keys.left = false; break;
+            case 'ArrowRight': keys.right = false; break;
+            case 'ArrowUp': keys.up = false; break;
+            case 'ArrowDown': keys.down = false; break;
+            case ' ': keys.space = false; break;
+            case 'x': keys.x = false; break;
+        }
+    });
+
+    // Add level configuration constants
+    const LEVELS = [
+        {
+            buildings: [
+                { x: 200, width: WINDOW_WIDTH * 2, height: GROUND_Y - 100, cols: 2, rows: 5, guards: 8 }
+            ],
+            maxTanks: 1,
+            tankSpawnRate: 0.003,
+            guardSpawnRate: 0.008,
+            itemSpawnRate: 0.002
+        },
+        {
+            buildings: [
+                { x: 200, width: WINDOW_WIDTH * 2, height: GROUND_Y - 100, cols: 2, rows: 5, guards: 8 },
+                { x: 500, width: WINDOW_WIDTH * 2, height: GROUND_Y - 150, cols: 2, rows: 6, guards: 6 }
+            ],
+            maxTanks: 1,
+            tankSpawnRate: 0.004,
+            guardSpawnRate: 0.01,
+            itemSpawnRate: 0.002
+        },
+        {
+            buildings: [
+                { x: 100, width: WINDOW_WIDTH * 2, height: GROUND_Y - 120, cols: 2, rows: 5, guards: 6 },
+                { x: 350, width: WINDOW_WIDTH * 3, height: GROUND_Y - 180, cols: 3, rows: 7, guards: 8 },
+                { x: 600, width: WINDOW_WIDTH * 2, height: GROUND_Y - 150, cols: 2, rows: 6, guards: 6 }
+            ],
+            maxTanks: 2,
+            tankSpawnRate: 0.005,
+            guardSpawnRate: 0.012,
+            itemSpawnRate: 0.003
+        }
+    ];
+
+    // Add to gameState
+    let gameState = {
+        monster: {
+            x: 100,
+            y: GROUND_Y,
+            width: 30,
+            height: 50,
+            velocityX: 0,
+            velocityY: 0,
+            isClimbing: false,
+            facingRight: true,
+            health: 100,
+            punchCooldown: 0,
+            climbingRight: true,
+        },
+        buildings: [],
+        guards: [],
+        items: [],
+        currentLevel: 0,
+        tanks: [],
+        maxTanks: 2,  // Configurable
+        explosions: [],
+        levelComplete: false,
+        treadMarks: []  // Array to store tread marks
+    };
+
+    // Initialize canvas
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = CANVAS_WIDTH;
+    canvas.height = CANVAS_HEIGHT;
+
+    // Add building class definition
+    class Building {
+        constructor(x, width, height, windowCols, windowRows, guardCount) {
+            this.x = x;
+            this.width = width;
+            this.height = height;
+            this.windowCols = windowCols;
+            this.windowRows = windowRows;
+            this.remainingGuards = guardCount;  // Track total guards for this building
+            this.windows = [];
+            this.collapsed = false;
+            this.collapseStarted = false;
+            this.rotation = 0;
+            this.collapseProgress = 0;
+            this.fallDirection = Math.random() < 0.5 ? -1 : 1; // Random fall direction
+            this.explosions = [];
+
+            // Initialize windows with crack patterns
+            for (let row = 0; row < windowRows; row++) {
+                this.windows[row] = [];
+                for (let col = 0; col < windowCols; col++) {
+                    this.windows[row][col] = {
+                        health: WINDOW_HEALTH,
+                        broken: false,
+                        cracks: [],  // Array to store crack patterns
+                        particles: []  // Array for glass particles
+                    };
+                }
+            }
+
+            // Randomly select building style
+            this.style = this.randomBuildingStyle();
+            this.pattern = this.createBuildingPattern(this.style);
+        }
+
+        randomBuildingStyle() {
+            const styles = [
+                {
+                    name: 'brick',
+                    baseColor: '#CD853F',
+                    mortarColor: '#8B4513',
+                    windowColor: '#87CEEB',
+                    frameColor: '#E8E8E8'
+                },
+                {
+                    name: 'stone',
+                    baseColor: '#A9A9A9',
+                    mortarColor: '#696969',
+                    windowColor: '#B0E0E6',
+                    frameColor: '#D3D3D3'
+                },
+                {
+                    name: 'modern',
+                    baseColor: '#4A708B',
+                    mortarColor: '#36648B',
+                    windowColor: '#CAE1FF',
+                    frameColor: '#FFFFFF'
+                },
+                {
+                    name: 'art-deco',
+                    baseColor: '#DEB887',
+                    mortarColor: '#8B7355',
+                    windowColor: '#FFE4C4',
+                    frameColor: '#8B7355'
+                }
+            ];
+            return styles[Math.floor(Math.random() * styles.length)];
+        }
+
+        createBuildingPattern(style) {
+            const patternCanvas = document.createElement('canvas');
+            const patternCtx = patternCanvas.getContext('2d');
+            
+            switch(style.name) {
+                case 'brick':
+                    return this.createBrickPattern(patternCtx, style);
+                case 'stone':
+                    return this.createStonePattern(patternCtx, style);
+                case 'modern':
+                    return this.createModernPattern(patternCtx, style);
+                case 'art-deco':
+                    return this.createArtDecoPattern(patternCtx, style);
+            }
+        }
+
+        createBrickPattern(patternCtx, style) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 50;
+            canvas.height = 30;
+
+            // Base color
+            ctx.fillStyle = style.baseColor;
+            ctx.fillRect(0, 0, 50, 30);
+
+            // Mortar lines
+            ctx.strokeStyle = style.mortarColor;
+            ctx.lineWidth = 1;
+
+            // Horizontal lines
+            for (let y = 0; y < 30; y += 10) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(50, y);
+                ctx.stroke();
+            }
+
+            // Offset vertical lines for brick effect
+            for (let x = 0; x < 50; x += 25) {
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, 10);
+                ctx.moveTo(x + 12.5, 10);
+                ctx.lineTo(x + 12.5, 20);
+                ctx.moveTo(x, 20);
+                ctx.lineTo(x, 30);
+                ctx.stroke();
+            }
+
+            return ctx.createPattern(canvas, 'repeat');
+        }
+
+        createStonePattern(patternCtx, style) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 60;
+            canvas.height = 60;
+
+            // Base color
+            ctx.fillStyle = style.baseColor;
+            ctx.fillRect(0, 0, 60, 60);
+
+            // Create random stone shapes
+            for (let i = 0; i < 8; i++) {
+                for (let j = 0; j < 8; j++) {
+                    ctx.beginPath();
+                    ctx.fillStyle = style.mortarColor;
+                    ctx.strokeStyle = style.mortarColor;
+                    ctx.lineWidth = 1;
+                    
+                    const x = i * 15 + Math.random() * 4;
+                    const y = j * 15 + Math.random() * 4;
+                    const size = 10 + Math.random() * 5;
+                    
+                    ctx.moveTo(x, y);
+                    for (let angle = 0; angle < Math.PI * 2; angle += Math.PI/3) {
+                        const radius = size * (0.8 + Math.random() * 0.4);
+                        ctx.lineTo(
+                            x + Math.cos(angle) * radius,
+                            y + Math.sin(angle) * radius
+                        );
+                    }
+                    ctx.closePath();
+                    ctx.stroke();
+                }
+            }
+
+            return ctx.createPattern(canvas, 'repeat');
+        }
+
+        createModernPattern(patternCtx, style) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 40;
+            canvas.height = 40;
+
+            // Base color
+            ctx.fillStyle = style.baseColor;
+            ctx.fillRect(0, 0, 40, 40);
+
+            // Add modern geometric patterns
+            ctx.strokeStyle = style.mortarColor;
+            ctx.lineWidth = 2;
+
+            // Vertical lines
+            for (let x = 0; x < 40; x += 10) {
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, 40);
+                ctx.stroke();
+            }
+
+            // Horizontal accent lines
+            for (let y = 0; y < 40; y += 20) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(40, y);
+                ctx.stroke();
+            }
+
+            return ctx.createPattern(canvas, 'repeat');
+        }
+
+        createArtDecoPattern(patternCtx, style) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            canvas.width = 60;
+            canvas.height = 60;
+
+            // Base color
+            ctx.fillStyle = style.baseColor;
+            ctx.fillRect(0, 0, 60, 60);
+
+            // Art deco geometric patterns
+            ctx.strokeStyle = style.mortarColor;
+            ctx.lineWidth = 2;
+
+            // Draw zigzag pattern
+            ctx.beginPath();
+            for (let x = 0; x < 60; x += 20) {
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x + 10, 30);
+                ctx.lineTo(x, 60);
+            }
+            ctx.stroke();
+
+            // Draw decorative circles
+            for (let x = 0; x < 60; x += 30) {
+                for (let y = 0; y < 60; y += 30) {
+                    ctx.beginPath();
+                    ctx.arc(x + 15, y + 15, 5, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+            }
+
+            return ctx.createPattern(canvas, 'repeat');
+        }
+
+        startCollapse() {
+            if (this.collapseStarted) return;
+            
+            this.collapsed = true;
+            this.collapseStarted = true;
+
+            // monster falls off
+            gameState.monster.isClimbing = false;
+            gameState.monster.climbingBuilding = null;
+
+            // Create fewer explosions, spaced out over time
+            this.explosionSequence = [];
+            const explosionCount = 8;  // Reduced number of explosions
+            
+            for (let i = 0; i < explosionCount; i++) {
+                this.explosionSequence.push({
+                    x: this.x + Math.random() * this.width,
+                    y: GROUND_Y - Math.random() * this.height,
+                    delay: i * 20  // More delay between explosions
+                });
+            }
+        }
+
+        updateCollapse() {
+            if (!this.collapseStarted) return;
+
+            // Add new explosions from sequence
+            this.explosionSequence = this.explosionSequence.filter(exp => {
+                exp.delay--;
+                if (exp.delay <= 0) {
+                    this.explosions.push({
+                        x: exp.x,
+                        y: exp.y,
+                        radius: 0,
+                        maxRadius: 50 + Math.random() * 50,
+                        alpha: 1
+                    });
+                    return false;  // Remove from sequence
+                }
+                return true;
+            });
+
+            // Update existing explosions
+            this.explosions.forEach(explosion => {
+                if (explosion.radius < explosion.maxRadius) {
+                    explosion.radius += 1.5;  // Slower expansion
+                    explosion.alpha = Math.max(0, explosion.alpha - 0.015);  // Slower fade
+                }
+            });
+
+            // Remove completely faded explosions
+            this.explosions = this.explosions.filter(explosion => explosion.alpha > 0);
+
+            // Set building as fully collapsed only after all explosions are done
+            if (this.explosionSequence.length === 0 && this.explosions.length === 0) {
+                this.collapsed = true;
+            }
+        }
+
+        checkCollapse() {
+            // Count broken windows
+            let brokenCount = 0;
+            let totalWindows = this.windowRows * this.windowCols;
+            
+            for (let row = 0; row < this.windowRows; row++) {
+                for (let col = 0; col < this.windowCols; col++) {
+                    if (this.windows[row][col].broken) brokenCount++;
+                }
+            }
+            
+            if (brokenCount >= totalWindows * 0.7 && !this.collapsed) {  // 70% broken windows
+                this.startCollapse();
+                return true;
+            }
+            return false;
+        }
+
+        render(ctx) {
+            if (this.collapseStarted) {
+                // Draw explosions
+                console.log('Drawing explosion!');
+                this.explosions.forEach(explosion => {
+                    ctx.save();
+                    ctx.globalAlpha = explosion.alpha;
+                    const gradient = ctx.createRadialGradient(
+                        explosion.x, explosion.y, 0,
+                        explosion.x, explosion.y, explosion.radius
+                    );
+                    gradient.addColorStop(0, 'rgba(255, 165, 0, 1)');  // Orange
+                    gradient.addColorStop(0.5, 'rgba(255, 69, 0, 0.8)');  // Red
+                    gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');  // Transparent
+                    ctx.fillStyle = gradient;
+                    ctx.beginPath();
+                    ctx.arc(explosion.x, explosion.y, explosion.radius, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.restore();
+                });
+            } else {
+                // Fill building with pattern
+                ctx.fillStyle = this.pattern;
+                ctx.fillRect(this.x, GROUND_Y - this.height, this.width, this.height);
+
+                // Draw windows with damage effects
+                for (let row = 0; row < this.windowRows; row++) {
+                    for (let col = 0; col < this.windowCols; col++) {
+                        const window = this.windows[row][col];
+                        const windowX = this.x + (col * WINDOW_WIDTH) + 8;
+                        const windowY = GROUND_Y - this.height + (row * WINDOW_HEIGHT) + 15;
+                        
+                        if (window.broken) {
+                            // Draw irregular hole shape
+                            ctx.fillStyle = '#000000';
+                            ctx.beginPath();
+                            const centerX = windowX + (WINDOW_WIDTH - 16) / 2;
+                            const centerY = windowY + (WINDOW_HEIGHT - 16) / 2;
+                            const points = 8;
+                            const innerRadius = (WINDOW_WIDTH - 16) / 3;
+                            const outerRadius = (WINDOW_WIDTH - 16) / 2;
+                            
+                            // Create irregular hole shape
+                            for (let i = 0; i <= points * 2; i++) {
+                                const angle = (i * Math.PI) / points;
+                                const radius = i % 2 === 0 ? 
+                                    outerRadius : 
+                                    innerRadius + Math.random() * (outerRadius - innerRadius);
+                                const x = centerX + Math.cos(angle) * radius;
+                                const y = centerY + Math.sin(angle) * radius;
+                                
+                                if (i === 0) ctx.moveTo(x, y);
+                                else ctx.lineTo(x, y);
+                            }
+                            ctx.closePath();
+                            ctx.fill();
+                            
+                            // Add fire effect
+                            const time = Date.now() / 100;
+                            for (let i = 0; i < 3; i++) {
+                                const gradient = ctx.createRadialGradient(
+                                    centerX + Math.sin(time + i) * 3, 
+                                    centerY + Math.cos(time + i) * 3, 
+                                    0,
+                                    centerX + Math.sin(time + i) * 3, 
+                                    centerY + Math.cos(time + i) * 3, 
+                                    innerRadius
+                                );
+                                gradient.addColorStop(0, `rgba(255, ${100 + Math.sin(time) * 50}, 0, 0.${7-i})`);
+                                gradient.addColorStop(0.5, 'rgba(255, 0, 0, 0.2)');
+                                gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+                                
+                                ctx.fillStyle = gradient;
+                                ctx.beginPath();
+                                ctx.arc(
+                                    centerX + Math.sin(time + i) * 3, 
+                                    centerY + Math.cos(time + i) * 3, 
+                                    innerRadius, 
+                                    0, 
+                                    Math.PI * 2
+                                );
+                                ctx.fill();
+                            }
+                        } else {
+                            // Intact window rendering
+                            ctx.fillStyle = this.style.windowColor;
+                            ctx.fillRect(windowX, windowY, WINDOW_WIDTH - 16, WINDOW_HEIGHT - 16);
+                            
+                            // Draw cracks with enhanced visibility
+                            if (window.cracks.length > 0) {
+                                // Draw crack shadow for depth
+                                ctx.strokeStyle = 'rgba(0, 0, 0, 0.4)';
+                                ctx.lineWidth = 3;
+                                window.cracks.forEach(crack => {
+                                    ctx.beginPath();
+                                    ctx.moveTo(windowX + crack[0].x, windowY + crack[0].y);
+                                    for (let i = 1; i < crack.length; i++) {
+                                        ctx.lineTo(windowX + crack[i].x, windowY + crack[i].y);
+                                    }
+                                    ctx.stroke();
+                                });
+
+                                // Draw main crack lines
+                                ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+                                ctx.lineWidth = 2;
+                                window.cracks.forEach(crack => {
+                                    ctx.beginPath();
+                                    ctx.moveTo(windowX + crack[0].x, windowY + crack[0].y);
+                                    for (let i = 1; i < crack.length; i++) {
+                                        ctx.lineTo(windowX + crack[i].x, windowY + crack[i].y);
+                                    }
+                                    ctx.stroke();
+                                });
+                            }
+                        }
+                        
+                        // Window frame
+                        if (!window.broken) {
+                            ctx.strokeStyle = this.style.frameColor;
+                            ctx.lineWidth = 2;
+                            ctx.strokeRect(windowX, windowY, WINDOW_WIDTH - 16, WINDOW_HEIGHT - 16);
+                        }
+                    }
+                }
+
+                // Draw grand entrance
+                const entranceWidth = this.width / 3;
+                const entranceHeight = 60;
+                const entranceX = this.x + (this.width - entranceWidth) / 2;
+                
+                // Entrance arch
+                ctx.fillStyle = '#8B4513';
+                ctx.beginPath();
+                ctx.moveTo(entranceX, GROUND_Y);
+                ctx.lineTo(entranceX, GROUND_Y - entranceHeight + 20);
+                ctx.quadraticCurveTo(
+                    entranceX + entranceWidth/2, 
+                    GROUND_Y - entranceHeight - 10,
+                    entranceX + entranceWidth, 
+                    GROUND_Y - entranceHeight + 20
+                );
+                ctx.lineTo(entranceX + entranceWidth, GROUND_Y);
+                ctx.fill();
+                
+                // Entrance details
+                ctx.strokeStyle = '#A0522D';
+                ctx.lineWidth = 3;
+                ctx.stroke();
+            }
+        }
+
+        damageWindow(row, col) {
+
+
+            const window = this.windows[row][col];
+            if (!window.broken) {
+                window.health--;
+                
+                // Add crack pattern
+                const windowX = this.x + (col * WINDOW_WIDTH) + 8;
+                const windowY = GROUND_Y - this.height + (row * WINDOW_HEIGHT) + 15;
+                
+                // Create new cracks
+                const crackCount = Math.random() * 3 + 2;
+                for (let i = 0; i < crackCount; i++) {
+                    const startX = Math.random() * (WINDOW_WIDTH - 16);
+                    const startY = Math.random() * (WINDOW_HEIGHT - 16);
+                    window.cracks.push(this.generateCrackPattern(startX, startY));
+                }
+
+                // Create glass particles if window breaks
+                if (window.health <= 0) {
+                    window.broken = true;
+                    this.createGlassParticles(row, col);
+                    this.checkCollapse();
+                }
+                return true;
+            }
+            return false;
+        }
+
+        generateCrackPattern(startX, startY) {
+            const points = [{x: startX, y: startY}];
+            let currentX = startX;
+            let currentY = startY;
+            
+            // Generate 3-5 connected points for the crack
+            const segments = Math.floor(Math.random() * 3) + 3;
+            for (let i = 0; i < segments; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const length = Math.random() * 10 + 5;
+                currentX += Math.cos(angle) * length;
+                currentY += Math.sin(angle) * length;
+                points.push({x: currentX, y: currentY});
+            }
+            
+            return points;
+        }
+
+        createGlassParticles(row, col) {
+            const windowX = this.x + (col * WINDOW_WIDTH) + 8;
+            const windowY = GROUND_Y - this.height + (row * WINDOW_HEIGHT) + 15;
+            const window = this.windows[row][col];
+
+            // Create glass particles
+            for (let i = 0; i < 15; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const speed = Math.random() * 3 + 2;
+                window.particles.push({
+                    x: windowX + (WINDOW_WIDTH - 16) / 2,
+                    y: windowY + (WINDOW_HEIGHT - 16) / 2,
+                    vx: Math.cos(angle) * speed,
+                    vy: Math.sin(angle) * speed - 2, // Initial upward boost
+                    rotation: Math.random() * Math.PI * 2,
+                    size: Math.random() * 4 + 2,
+                    alpha: 1
+                });
+            }
+        }
+    }
+
+    // Add to monster state in gameState
+    gameState.monster.isPunching = false;
+    gameState.monster.punchTimer = 0;
+    gameState.monster.punchCooldown = 0;
+
+    // Add guard constants
+    const GUARD_SPAWN_RATE = 0.01;  // Chance per guard per frame
+    const GUARD_APPEAR_TIME = 5000;  // How long guard is visible before shooting (ms)
+    const GUARD_SHOOT_TIME = 3000;    // How long guard stays after shooting (ms)
+    const GUARD_DAMAGE = 10;         // Damage dealt to monster
+    const BULLET_SPEED = 2;          // Speed of guard's bullet
+    const GUARD_MAX = 2;  // Maximum number of guards that can be active per building at once
+
+    // Add Guard class
+    class Guard {
+        constructor(building, row, col) {
+            this.building = building;
+            this.row = row;
+            this.col = col;
+            this.state = 'appearing';  // 'appearing', 'shooting', 'disappearing'
+            this.timer = GUARD_APPEAR_TIME;
+            this.bullet = null;
+        }
+
+        update() {
+            this.timer -= 16;  // Assuming 60fps
+
+            switch(this.state) {
+                case 'appearing':
+                    if (this.timer <= 0) {
+                        this.state = 'shooting';
+                        this.timer = GUARD_SHOOT_TIME;
+                        this.shoot();
+                    }
+                    break;
+                case 'shooting':
+                    if (this.timer <= 0) {
+                        this.state = 'disappearing';
+                    }
+                    break;
+            }
+
+            // Update bullet if it exists
+            if (this.bullet) {
+                this.bullet.x += this.bullet.velocityX;
+                this.bullet.y += this.bullet.velocityY;
+
+                // Check bullet collision with monster
+                const monster = gameState.monster;
+                if (this.bullet.x > monster.x && 
+                    this.bullet.x < monster.x + monster.width &&
+                    this.bullet.y > monster.y - monster.height && 
+                    this.bullet.y < monster.y) {
+                    monster.health -= GUARD_DAMAGE;
+                    this.bullet = null;
+                }
+
+                // Remove bullet if off screen
+                else if (this.bullet.x < 0 || 
+                         this.bullet.x > CANVAS_WIDTH || 
+                         this.bullet.y < 0 || 
+                         this.bullet.y > CANVAS_HEIGHT) {
+                    this.bullet = null;
+                }
+            }
+        }
+
+        render(ctx) {
+            const windowX = this.building.x + (this.col * WINDOW_WIDTH) + WINDOW_WIDTH/2;
+            const windowY = GROUND_Y - this.building.height + (this.row * WINDOW_HEIGHT) + WINDOW_HEIGHT/2;
+
+            ctx.save();
+            
+            // Draw guard
+            if (this.state !== 'disappearing') {
+                // Guard body
+                ctx.fillStyle = '#1E3F66';  // Dark blue uniform
+                ctx.beginPath();
+                ctx.arc(windowX, windowY, 10, 0, Math.PI * 2);  // Head
+                ctx.fill();
+                
+                // Guard uniform
+                ctx.fillStyle = '#2E5984';  // Lighter blue for uniform details
+                ctx.fillRect(windowX - 8, windowY + 10, 16, 20);  // Body
+                
+                // Guard arms and gun
+                ctx.strokeStyle = '#1E3F66';
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                
+                // Calculate angle to monster for aiming
+                const monster = gameState.monster;
+                const dx = (monster.x + monster.width/2) - windowX;
+                const dy = (monster.y - monster.height/2) - windowY;
+                const angle = Math.atan2(dy, dx);
+                
+                // Draw arms holding rifle
+                ctx.moveTo(windowX, windowY + 12);
+                ctx.lineTo(windowX + Math.cos(angle) * 20, windowY + Math.sin(angle) * 20);
+                
+                // Draw rifle
+                ctx.strokeStyle = '#463E3F';  // Dark gray for rifle
+                ctx.lineWidth = 3;
+                ctx.moveTo(windowX + Math.cos(angle) * 5, windowY + Math.sin(angle) * 5);
+                ctx.lineTo(windowX + Math.cos(angle) * 25, windowY + Math.sin(angle) * 25);
+                
+                ctx.stroke();
+                
+                // Badge
+                ctx.fillStyle = '#FFD700';  // Gold color
+                ctx.beginPath();
+                ctx.arc(windowX, windowY + 15, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Draw bullet if it exists
+            if (this.bullet) {
+                const bulletLength = 8;
+                const bulletWidth = 2;
+                const angle = Math.atan2(this.bullet.velocityY, this.bullet.velocityX);
+                
+                ctx.save();
+                ctx.translate(this.bullet.x, this.bullet.y);
+                ctx.rotate(angle);
+                
+                // Bullet trail
+                const gradient = ctx.createLinearGradient(-bulletLength * 2, 0, 0, 0);
+                gradient.addColorStop(0, 'rgba(255, 255, 0, 0)');  // Transparent yellow
+                gradient.addColorStop(1, 'rgba(255, 200, 0, 0.6)');  // Semi-transparent orange
+                ctx.fillStyle = gradient;
+                ctx.fillRect(-bulletLength * 2, -bulletWidth, bulletLength * 2, bulletWidth * 2);
+                
+                // Bullet
+                ctx.fillStyle = '#FFD700';  // Gold color
+                ctx.beginPath();
+                ctx.moveTo(0, 0);  // Bullet tip
+                ctx.lineTo(-bulletLength, bulletWidth);  // Bottom right
+                ctx.lineTo(-bulletLength, -bulletWidth);  // Top right
+                ctx.closePath();
+                ctx.fill();
+                
+                // Bullet glow
+                ctx.shadowColor = '#FFA500';
+                ctx.shadowBlur = 5;
+                ctx.fill();
+                
+                ctx.restore();
+            }
+            
+            ctx.restore();
+        }
+
+        shoot() {
+            const windowX = this.building.x + (this.col * WINDOW_WIDTH) + WINDOW_WIDTH/2;
+            const windowY = GROUND_Y - this.building.height + (this.row * WINDOW_HEIGHT) + WINDOW_HEIGHT/2;
+            const monster = gameState.monster;
+            
+            // Calculate direction to monster
+            const dx = (monster.x + monster.width/2) - windowX;
+            const dy = (monster.y - monster.height/2) - windowY;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            
+            // Add bullet spread for more realistic shooting
+            const spread = (Math.random() - 0.5) * 0.2;
+            const bulletSpeed = BULLET_SPEED;
+            
+            this.bullet = {
+                x: windowX,
+                y: windowY,
+                velocityX: (dx / dist) * bulletSpeed + spread,
+                velocityY: (dy / dist) * bulletSpeed + spread,
+                created: Date.now()  // Track bullet age for potential trail effect
+            };
+        }
+    }
+
+    // Add item constants
+    const ITEM_SPAWN_RATE = 0.002;  // Chance per building per frame (not per window)
+    const ITEM_DURATION = 5000;     // How long items stay visible (ms)
+
+    // Define item types
+    const ITEMS = {
+        GOOD: [
+            { type: 'turkey', health: 20, color: '#8B4513' },
+            { type: 'milk', health: 15, color: '#FFFFFF' },
+            { type: 'fruit', health: 10, color: '#FF0000' },
+            { type: 'hamburger', health: 25, color: '#D2691E' },
+            { type: 'toast', health: 5, color: '#DEB887' }
+        ],
+        BAD: [
+            { type: 'cactus', damage: 10, color: '#228B22' },
+            { type: 'poison', damage: 15, color: '#800080' },
+            { type: 'dynamite', damage: 20, color: '#FF4500' }
+        ]
+    };
+
+    // Add Item class
+    class Item {
+        constructor(building, row, col) {
+            this.building = building;
+            this.row = row;
+            this.col = col;
+            this.timer = ITEM_DURATION;
+            
+            // Randomly choose good or bad item
+            const isGood = Math.random() < 0.7;  // 70% chance of good item
+            const itemPool = isGood ? ITEMS.GOOD : ITEMS.BAD;
+            this.itemData = itemPool[Math.floor(Math.random() * itemPool.length)];
+        }
+
+        update() {
+            this.timer -= 16;  // Assuming 60fps
+            return this.timer > 0;
+        }
+
+        collect(monster) {
+            if (this.itemData.health) {
+                monster.health = Math.min(100, monster.health + this.itemData.health);
+            } else if (this.itemData.damage) {
+                monster.health = Math.max(0, monster.health - this.itemData.damage);
+            }
+        }
+    }
+
+    class Monster {
+        // Add climbing constants
+        CLIMB_SPEED = 1;
+        CLIMB_SNAP_DISTANCE = 20;  // How close monster needs to be to grab building
+
+        // Add combat constants
+        PUNCH_RANGE = 20;  // How far the punch reaches
+        PUNCH_WIDTH = 30;  // Width of punch hitbox
+        PUNCH_DURATION = 250;  // How long the punch animation lasts in ms
+        PUNCH_COOLDOWN = 500;  // Time between punches in ms
+
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.width = 30;
+            this.height = 50;
+            this.velocityX = 0;
+            this.velocityY = 0;
+            this.isClimbing = false;
+            this.facingRight = true;
+            this.health = 100;
+            this.punchCooldown = 0;
+            this.climbingRight = true;
+            this.isPunching = false;
+            this.punchStartTime = 0;
+            this.climbingBuilding = null;
+        }
+
+        update() {
+            if (this.isPunching) {
+                // Check if punch animation is complete
+                if (Date.now() - this.punchStartTime >= this.PUNCH_DURATION) {
+                    this.isPunching = false;
+                }
+            }
+
+            // Update punch cooldown
+            if (this.punchCooldown > 0) {
+                this.punchCooldown -= 16; // Assuming 60fps
+            }
+
+            if (this.isClimbing) {
+                // Climbing movement
+                if (keys.up) {
+                    this.velocityY = -this.CLIMB_SPEED;
+                } else if (keys.down) {
+                    this.velocityY = this.CLIMB_SPEED;
+                } else {
+                    this.velocityY = 0;
+                }
+
+                // Allow changing facing direction while climbing
+                if (keys.left) {
+                    this.facingRight = false;
+                } else if (keys.right) {
+                    this.facingRight = true;
+                }
+
+                // Update position while climbing
+                this.y += this.velocityY;
+
+                // Check if reached top or bottom of building
+                const building = this.climbingBuilding;
+                const buildingTop = GROUND_Y - building.height;
+                if (this.y <= buildingTop + this.height) {
+                    this.y = buildingTop;
+                    this.isClimbing = false;
+                    this.climbingBuilding = null;
+                    this.velocityY = 0;
+                }
+                if (this.y >= GROUND_Y) {
+                    this.y = GROUND_Y;
+                    this.isClimbing = false;
+                    this.climbingBuilding = null;
+                    this.velocityY = 0;
+                }
+
+                // Lock X position while climbing based on climbing side (not facing direction)
+                if (this.climbingBuilding) {
+                    if (this.climbingRight) {
+                        this.x = this.climbingBuilding.x - this.width/2;
+                    } else {
+                        this.x = this.climbingBuilding.x + this.climbingBuilding.width - this.width/2;
+                    }
+                }
+            } else {
+                // Normal movement code
+                if (keys.left) {
+                    this.velocityX = -MOVE_SPEED;
+                    this.facingRight = false;
+                } else if (keys.right) {
+                    this.velocityX = MOVE_SPEED;
+                    this.facingRight = true;
+                } else {
+                    this.velocityX *= FRICTION;
+                }
+
+                // Check for climbing initiation (both up and down)
+                if (keys.up || keys.down) {
+                    gameState.buildings.forEach(building => {
+                        if (building.collapsed) return;
+
+                        // Check if we're in climbing range of either edge
+                        const canClimbLeft = this.x + this.width > building.x - CLIMB_ZONE_WIDTH && 
+                                        this.x + this.width < building.x + CLIMB_ZONE_WIDTH;
+                        
+                        const canClimbRight = this.x > building.x + building.width - CLIMB_ZONE_WIDTH && 
+                                            this.x < building.x + building.width + CLIMB_ZONE_WIDTH;
+
+                        // Check if we're on top of the building
+                        const buildingTop = GROUND_Y - building.height;
+                        const onBuildingTop = Math.abs(this.y - buildingTop) < 1 && 
+                                            this.x + this.width > building.x - CLIMB_ZONE_WIDTH && 
+                                            this.x < building.x + building.width + CLIMB_ZONE_WIDTH;
+
+                        // If we're on top and pressing down, start climbing down
+                        if (onBuildingTop && keys.down) {
+                            const closerToLeft = Math.abs(this.x - building.x) < 
+                                            Math.abs(this.x - (building.x + building.width));
+                            this.startClimbing(building, !closerToLeft, true);
+                        }
+                        // Otherwise check normal climbing initiation
+                        else if (canClimbLeft) {
+                            this.startClimbing(building, false, onBuildingTop && keys.down);
+                        } else if (canClimbRight) {
+                            this.startClimbing(building, true, onBuildingTop && keys.down);
+                        }
+                    });
+                }
+
+                // Apply gravity when not climbing
+                this.velocityY += GRAVITY;
+
+                // Jump when on ground
+                if (keys.space && this.y === GROUND_Y) {
+                    this.velocityY = JUMP_FORCE;
+                }
+
+                // Update position
+                this.x += this.velocityX;
+                this.y += this.velocityY;
+
+                // Screen boundaries
+                this.x = Math.max(0, Math.min(CANVAS_WIDTH - this.width, this.x));
+
+                // Ground and building platform collisions
+                let onPlatform = false;
+                
+                // Check building tops
+                gameState.buildings.forEach(building => {
+                    if (building.collapsed) return;
+
+                    const buildingTop = GROUND_Y - building.height;
+                    
+                    // Check if monster is within building's x bounds
+                    if (this.x + this.width > building.x && 
+                    this.x < building.x + building.width) {
+                        
+                        // Check if monster is landing on building
+                        if (this.y >= buildingTop && 
+                            this.y <= buildingTop + this.velocityY) {
+                            this.y = buildingTop;
+                            this.velocityY = 0;
+                            onPlatform = true;
+                        }
+                    }
+                });
+
+                // Ground collision if not on a building platform
+                if (!onPlatform && this.y > GROUND_Y) {
+                    this.y = GROUND_Y;
+                    this.velocityY = 0;
+                    onPlatform = true;
+                }
+
+                // Allow jumping from any platform
+                if (keys.space && onPlatform) {
+                    this.velocityY = JUMP_FORCE;
+                }
+            }
+        }
+
+        punch() {
+            if (this.punchCooldown <= 0 && !this.isPunching) {
+                this.isPunching = true;
+                this.punchStartTime = Date.now();
+                this.punchCooldown = this.PUNCH_COOLDOWN;
+                return true;
+            }
+            return false;
+        }
+
+        // Add helper function for starting climbing
+        startClimbing(building, fromRight, fromTop = false) {
+            this.isClimbing = true;
+            this.climbingBuilding = building;
+            this.climbingRight = !fromRight;  // Which side we're climbing on
+            this.facingRight = !fromRight;    // Initial facing direction
+            this.velocityX = 0;
+            this.velocityY = 0;
+
+            // Snap to building edge based on climbing side
+            if (fromRight) {
+                this.x = building.x + building.width - this.width/2;
+            } else {
+                this.x = building.x - this.width/2;
+            }
+
+            // If starting from top, position just below the roof
+            if (fromTop) {
+                this.y = GROUND_Y - building.height + this.height;
+            }
+        }
+
+        render(ctx) {
+            const x = this.x;
+            const y = this.y;
+            
+            ctx.save();
+            // Flip context if facing left
+            if (!this.facingRight) {
+                ctx.translate(x + this.width, y);
+                ctx.scale(-1, 1);
+            } else {
+                ctx.translate(x, y);
+            }
+
+            // Body
+            ctx.fillStyle = '#4A6741';  // Dark green
+            ctx.beginPath();
+            ctx.roundRect(0, -this.height, this.width, this.height, 5);
+            ctx.fill();
+
+            // Muscles/highlights
+            ctx.fillStyle = '#557A48';  // Lighter green
+            ctx.beginPath();
+            ctx.ellipse(this.width/2, -this.height/2, this.width/3, this.height/3, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Head
+            ctx.fillStyle = '#4A6741';
+            ctx.beginPath();
+            ctx.arc(this.width/2, -this.height + 15, 12, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Eyes
+            ctx.fillStyle = 'white';
+            const eyeX = this.width/2 + 5;
+            const eyeY = -this.height + 15;
+            ctx.beginPath();
+            ctx.arc(eyeX, eyeY, 4, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Angry eyebrows
+            ctx.strokeStyle = '#2A3B25';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(eyeX - 5, eyeY - 5);
+            ctx.lineTo(eyeX + 5, eyeY - 3);
+            ctx.stroke();
+
+            // Spikes on back
+            ctx.fillStyle = '#2A3B25';
+            for (let i = 0; i < 4; i++) {
+                ctx.beginPath();
+                ctx.moveTo(2, -this.height + 20 + i * 15);
+                ctx.lineTo(8, -this.height + 30 + i * 15);
+                ctx.lineTo(14, -this.height + 20 + i * 15);
+                ctx.fill();
+            }
+
+            // Arms
+            if (this.isPunching) {
+                // Punching animation
+                const punchProgress = (Date.now() - this.punchStartTime) / this.PUNCH_DURATION;
+                const punchExtension = Math.sin(punchProgress * Math.PI) * this.PUNCH_RANGE;
+                
+                // Draw extended punching arm
+                ctx.fillStyle = '#4A6741';
+                ctx.beginPath();
+                ctx.roundRect(this.width - 5, -this.height + 30, 
+                            20 + punchExtension, 15, 5);
+                ctx.fill();
+                
+                // Fist
+                ctx.fillStyle = '#2A3B25';
+                ctx.beginPath();
+                ctx.arc(this.width + 15 + punchExtension, -this.height + 37, 8, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Punch effect
+                if (punchProgress < 0.3) {
+                    ctx.strokeStyle = 'rgba(255, 255, 255, ' + (0.8 - punchProgress * 2) + ')';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.arc(this.width + 15 + punchExtension, -this.height + 37, 
+                        12 + punchProgress * 20, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+            } else {
+                // Normal arm
+                ctx.fillStyle = '#4A6741';
+                ctx.beginPath();
+                ctx.roundRect(this.width - 5, -this.height + 30, 20, 15, 5);
+                ctx.fill();
+                
+                // Hand
+                ctx.fillStyle = '#2A3B25';
+                ctx.beginPath();
+                ctx.arc(this.width + 15, -this.height + 37, 6, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Legs
+            if (this.isClimbing) {
+                // Climbing legs
+                ctx.fillStyle = '#4A6741';
+                ctx.beginPath();
+                ctx.roundRect(5, -30, 15, 30, 5);  // Left leg
+                ctx.roundRect(this.width - 20, -30, 15, 30, 5);  // Right leg
+                ctx.fill();
+            } else {
+                // Walking/standing legs
+                const legOffset = Math.sin(Date.now() / 200) * 5;
+                ctx.fillStyle = '#4A6741';
+                ctx.beginPath();
+                ctx.roundRect(5, -30 + legOffset, 15, 30, 5);  // Left leg
+                ctx.roundRect(this.width - 20, -30 - legOffset, 15, 30, 5);  // Right leg
+                ctx.fill();
+            }
+
+            // Add climbing dust effect when climbing
+            if (this.isClimbing) {
+                ctx.fillStyle = 'rgba(200, 200, 200, 0.5)';
+                for (let i = 0; i < 3; i++) {
+                    const dustX = Math.random() * this.width;
+                    const dustY = -Math.random() * this.height;
+                    const dustSize = Math.random() * 5 + 2;
+                    ctx.beginPath();
+                    ctx.arc(dustX, dustY, dustSize, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            ctx.restore();
+        }
+    }
+
+    // Add tank constants
+    const TANK_SPAWN_RATE = 0.005;  // Chance per frame if below max tanks
+    const TANK_SPEED = 2;
+    const TANK_HEALTH = 3;
+    const TANK_SHOOT_RANGE = 200;
+    const TANK_PAUSE_TIME = 2000;
+    const TANK_WIDTH = 80;
+    const TANK_HEIGHT = 20;
+    const TANK_KNOCKBACK = 15;
+    const TANK_DAMAGE = 15;
+    const EXPLOSION_RADIUS = 50;
+    const TANK_BULLET_SPEED = 0.2;
+    const MAX_HEIGHT = CANVAS_HEIGHT/2;  // Add this
+
+    // Add Tank class
+    class Tank {
+        constructor() {
+            // Randomly choose left or right side
+            this.fromLeft = Math.random() < 0.5;
+            this.x = this.fromLeft ? -TANK_WIDTH : CANVAS_WIDTH;
+            this.y = GROUND_Y - TANK_HEIGHT;
+            this.width = TANK_WIDTH;
+            this.height = TANK_HEIGHT;
+            this.health = TANK_HEALTH;
+            this.state = 'moving';  // 'moving', 'shooting', 'pausing'
+            this.timer = 0;
+            this.projectile = null;
+            this.facingRight = !this.fromLeft;
+            this.moveTarget = null;
+        }
+
+        update(monster) {
+            switch(this.state) {
+                case 'moving':
+                    if (!this.moveTarget) {
+                        // If close to monster, prepare to shoot
+                        const distToMonster = Math.abs(this.x - monster.x);
+                        if (distToMonster < TANK_SHOOT_RANGE && 
+                            this.x > 0 && this.x < CANVAS_WIDTH) {  // Only shoot if on screen
+                            this.state = 'pausing';
+                            this.timer = TANK_PAUSE_TIME;
+                            break;
+                        }
+                        if (!this.moveTarget) {
+                            // Pick a new target position that's at least minMoveDistance away
+                            const padding = TANK_WIDTH;
+                            let newTarget;
+                            newTarget = Math.random() * (CANVAS_WIDTH - padding * 2) + padding;
+                            
+                            this.moveTarget = newTarget;
+                            this.facingRight = this.moveTarget > this.x;
+                        }                            
+                    }
+
+                    // Move towards target
+                    const dx = this.moveTarget - this.x;
+                    if (Math.abs(dx) < TANK_SPEED) {
+                        this.x = this.moveTarget;
+                        this.moveTarget = null;
+                        this.state = 'pausing';
+                        this.timer = TANK_PAUSE_TIME;
+                    } else {
+                        this.x += Math.sign(dx) * TANK_SPEED;
+                    }
+                    break;
+
+                case 'pausing':
+                    this.timer -= 16;
+                    if (this.timer <= 0) {
+                        // Only shoot if on screen
+                        if (this.x > 0 && this.x < CANVAS_WIDTH) {
+                            this.state = 'shooting';
+                            this.shoot(monster);
+                        } else {
+                            this.state = 'moving';
+                        }
+                    }
+                    break;
+
+                case 'shooting':
+                    if (this.projectile) {
+                        const GRAVITY_PROJECTILE = GRAVITY * TANK_BULLET_SPEED;
+                        // Update projectile position with arc trajectory
+                        this.projectile.x += this.projectile.velocityX * TANK_BULLET_SPEED;
+                        this.projectile.y += this.projectile.velocityY * TANK_BULLET_SPEED;
+                        this.projectile.velocityY += GRAVITY_PROJECTILE;
+
+                        // Check if projectile hit ground or monster
+                        if (this.projectile.y >= GROUND_Y) {
+                            this.explode(monster);
+                            this.projectile = null;
+                            this.state = 'moving';
+                            this.timer = TANK_PAUSE_TIME;
+                        } else if (this.checkProjectileHit(monster)) {
+                            this.explode(monster);
+                            this.projectile = null;
+                            this.state = 'moving';
+                            this.timer = TANK_PAUSE_TIME;
+                        }
+                    } else {
+                        // After shooting, force movement
+                        this.state = 'moving';
+                        this.moveTarget = null;
+                    }
+                    break;
+            }
+        }
+
+        shoot(monster) {
+            const GRAVITY_PROJECTILE = GRAVITY * TANK_BULLET_SPEED;
+            // Calculate initial velocities to reach MAX_HEIGHT
+            const heightToReach = Math.abs(MAX_HEIGHT - this.y) / TANK_BULLET_SPEED;  // Use absolute value
+            const initialVy = -Math.sqrt(2 * GRAVITY_PROJECTILE * heightToReach);  // Negative for upward motion
+            
+            // Calculate time to reach target based on y velocity and gravity
+            const timeToApex = -initialVy / GRAVITY_PROJECTILE;  // Time to reach maximum height
+            const totalTime = timeToApex * 2;  // Total time for arc (up and down)
+            
+            // Calculate required x velocity to hit target in that time
+            const targetX = monster.x + monster.width/2;
+            const dx = (targetX - (this.x + TANK_WIDTH/2)) / TANK_BULLET_SPEED;
+            const initialVx = dx / totalTime;
+            
+            // Sanity check the values before creating projectile
+            if (isNaN(initialVx) || isNaN(initialVy)) {
+                console.error('Invalid velocity calculation');
+                this.state = 'moving';
+                return;
+            }
+            
+            this.projectile = {
+                x: this.x + TANK_WIDTH/2,
+                y: this.y + 0.0001,
+                velocityX: initialVx,
+                velocityY: initialVy
+            };
+        }
+
+        checkProjectileHit(monster) {
+            return this.projectile.x > monster.x &&
+                   this.projectile.x < monster.x + monster.width &&
+                   this.projectile.y > monster.y - monster.height &&
+                   this.projectile.y < monster.y;
+        }
+
+        explode(monster) {
+            // Calculate distance from explosion to monster
+            const dx = monster.x + monster.width / 2 - this.projectile.x;
+            const dy = (monster.y - monster.height / 2) - this.projectile.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            if (distance < EXPLOSION_RADIUS) {
+                // Deal damage and knock back
+                monster.health -= TANK_DAMAGE;
+                const knockbackDirection = Math.sign(dx);
+                monster.velocityX = TANK_KNOCKBACK * knockbackDirection;
+                monster.velocityY = -TANK_KNOCKBACK / 2; // Small upward boost
+            }
+
+            // Create an explosion at the projectile's position
+            gameState.explosions.push(new Explosion(this.projectile.x, this.projectile.y));
+        }
+
+        render(ctx) {
+            const x = this.x;
+            const y = this.y;
+            
+            ctx.save();
+            // Tank treads (base)
+            ctx.fillStyle = '#1a1a1a';  // Darker base
+            ctx.fillRect(x, y + this.height - 20, this.width, 20);  // Made treads taller
+            
+            // Tread details
+            const treadOffset = (Date.now() / 100) % 10;
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 3;  // Thicker lines
+            for (let i = 0; i < this.width + 10; i += 10) {
+                const offset = (i + treadOffset) % this.width;
+                ctx.beginPath();
+                ctx.moveTo(x + offset, y + this.height- 20);
+                ctx.lineTo(x + offset, y + this.height);
+                ctx.stroke();
+            }
+
+            // Tank body - main hull
+            ctx.fillStyle = '#355E3B';  // Hunter green
+            ctx.fillRect(x, y + 10, this.width, this.height - 20);  // Body above treads
+
+            // Tank turret base
+            ctx.fillStyle = '#2B4B32';  // Darker green
+            ctx.beginPath();
+            ctx.arc(x + this.width/2, y, 15, 0, Math.PI * 2);  // Larger turret
+            ctx.fill();
+
+            // Tank cannon
+            ctx.fillStyle = '#1a1a1a';
+            const cannonLength = 30;
+            ctx.fillRect(
+                this.facingRight ? x + this.width/2 : x + this.width/2 - cannonLength,
+                y - 8,  // Align with turret
+                cannonLength,
+                6
+            );
+
+            // Muzzle flash when shooting
+            if (this.isShooting && Date.now() - this.lastShotTime < 100) {
+                const flashX = this.facingRight ? 
+                    x + this.width/2 + cannonWidth : 
+                    x + this.width/2 - cannonWidth;
+                
+                // Outer flash
+                ctx.fillStyle = '#FFA500';  // Orange
+                ctx.beginPath();
+                ctx.arc(flashX, y - 40, 12, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Inner flash
+                ctx.fillStyle = '#FFD700';  // Yellow
+                ctx.beginPath();
+                ctx.arc(flashX, y - 40, 8, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Draw shadow under tank
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+            ctx.beginPath();
+            ctx.ellipse(x + this.width/2, y + this.height, this.width/2, 5, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Draw projectile if it exists
+            if (this.projectile) {
+                // Draw bullet trail
+                const gradient = ctx.createLinearGradient(
+                    this.projectile.x - this.projectile.velocityX * 5,
+                    this.projectile.y - this.projectile.velocityY * 5,
+                    this.projectile.x,
+                    this.projectile.y
+                );
+                gradient.addColorStop(0, 'rgba(255, 100, 0, 0)');
+                gradient.addColorStop(1, 'rgba(255, 200, 0, 0.5)');
+                
+                ctx.fillStyle = gradient;
+                ctx.beginPath();
+                ctx.arc(this.projectile.x, this.projectile.y, 6, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Draw bullet
+                ctx.fillStyle = '#FFD700';  // Gold color
+                ctx.beginPath();
+                ctx.arc(this.projectile.x, this.projectile.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            ctx.restore();
+        }
+    }
+
+    // Add Explosion class definition
+    class Explosion {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.radius = 0;
+            this.maxRadius = EXPLOSION_RADIUS; // Use the existing EXPLOSION_RADIUS constant
+            this.expansionRate = 2; // Adjust this for speed of explosion growth
+            this.opacity = 1; // For fade-out effect
+            this.active = true;
+        }
+
+        update() {
+            // Increase the radius
+            if (this.radius < this.maxRadius) {
+                this.radius += this.expansionRate;
+            }
+            
+            // Reduce opacity over time
+            this.opacity -= 0.02;
+            if (this.opacity <= 0) {
+                this.active = false; // Mark explosion for removal
+            }
+        }
+
+        render(ctx) {
+            ctx.save();
+            ctx.globalAlpha = this.opacity;
+            ctx.fillStyle = 'orange';
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    // Main game loop
+    function gameLoop() {
+        update();
+        render();
+        requestAnimationFrame(gameLoop);
+    }
+
+    // Add function to initialize a level
+    function initializeLevel(levelIndex) {
+        const levelConfig = LEVELS[levelIndex];
+        console.log('Initializing level:', levelIndex, levelConfig);  // Debug log
+        
+        // Clear existing entities
+        gameState.buildings = [];
+        gameState.guards = [];
+        gameState.tanks = [];
+        gameState.items = [];
+        gameState.explosions = [];
+        
+        // Create new buildings from level config
+        levelConfig.buildings.forEach(buildingConfig => {
+            gameState.buildings.push(new Building(
+                buildingConfig.x,
+                buildingConfig.width,
+                buildingConfig.height,
+                buildingConfig.cols,
+                buildingConfig.rows,
+                buildingConfig.guards
+            ));
+        });
+        
+        gameState.monster = new Monster(100, GROUND_Y);
+        
+        gameState.levelComplete = false;
+        
+        console.log('Level initialized with buildings:', gameState.buildings);  // Debug log
+    }
+
+    // Add function to check level completion
+    function checkLevelComplete() {
+        if (gameState.levelComplete) return;
+        
+        const allBuildingsCollapsed = gameState.buildings.every(building => building.collapsed);
+        
+        if (allBuildingsCollapsed) {
+            gameState.levelComplete = true;
+            setTimeout(() => {
+                gameState.currentLevel++;
+                if (gameState.currentLevel < LEVELS.length) {
+                    initializeLevel(gameState.currentLevel);
+                } else {
+                    // Game complete!
+                    gameWon();
+                }
+            }, 2000);  // Wait 2 seconds before next level
+        }
+    }
+
+    // Add game won function
+    function gameWon() {
+        // Add your game won logic here
+        alert('Congratulations! You destroyed all the buildings!');
+        // Could restart game or show a victory screen
+        gameState.currentLevel = 0;
+        initializeLevel(0);
+    }
+
+    // Update the main update function
+    function update() {
+        const monster = gameState.monster;
+
+        monster.update();
+
+        // Handle punch initiation
+        if (keys.x && monster.punch()) {
+            // Check for window damage
+            gameState.buildings.forEach(building => {
+                if (building.collapsed) return;
+
+                // Only check windows if we're close enough to the building
+                if (Math.abs(monster.x - building.x) < monster.PUNCH_RANGE + monster.width ||
+                    Math.abs(monster.x - (building.x + building.width)) < monster.PUNCH_RANGE) {
+
+                    // Calculate which window we might be hitting
+                    const relativeX = monster.facingRight ?
+                        (monster.x + monster.width) - building.x :
+                        monster.x - building.x;
+                    
+                    // Calculate from building top instead of ground
+                    const buildingTop = GROUND_Y - building.height;
+                    const punchHeight = monster.y - (monster.height * 0.6);  // Punch at 60% up the monster's height
+                    const relativeY = punchHeight - buildingTop;
+
+                    const col = Math.floor(relativeX / WINDOW_WIDTH);
+                    const row = Math.floor(relativeY / WINDOW_HEIGHT);
+
+                    // If we're in range and facing the right way
+                    if (col >= 0 && col < building.windowCols && 
+                        row >= 0 && row < building.windowRows) {
+                        
+                        const damaged = building.damageWindow(row, col);
+                        if (damaged && building.checkCollapse()) {
+                            if (monster.climbingBuilding === building) {
+                                monster.isClimbing = false;
+                                monster.climbingBuilding = null;
+                                monster.velocityY = 0;
+                            }
+                        }
+
+                        // Check whether guard was hit
+                        gameState.guards = gameState.guards.filter(guard => {
+                            if (guard.building === building && 
+                                guard.row === row && 
+                                guard.col === col) {
+                                // Guard is in the window we're hitting
+                                guard.building.remainingGuards--;
+                                return false;
+                            }
+                            return true;
+                        });
+
+                        // Check whether item was collected
+                        gameState.items = gameState.items.filter(item => {
+                            if (item.building === building && 
+                                item.row === row && 
+                                item.col === col) {
+                                // Item is in the window we're hitting
+                                item.collect(monster);
+                                return false;
+                                }
+                            return true;
+                        });
+                    }
+                }
+            });
+        }
+
+        // Update guards
+        gameState.guards = gameState.guards.filter(guard => guard.state !== 'disappearing');
+        gameState.guards.forEach(guard => guard.update());
+
+        // Spawn new guards
+        gameState.buildings.forEach(building => {
+            if (building.collapsed || building.remainingGuards <= 0) return;
+
+            // Count current active guards for this building
+            const activeGuards = gameState.guards.filter(g => g.building === building).length;
+            
+            // Only try to spawn if below GUARD_MAX
+            if (activeGuards < GUARD_MAX && Math.random() < GUARD_SPAWN_RATE) {
+                // Find an unbroken window to spawn in
+                let availableWindows = [];
+                for (let row = 0; row < building.windowRows; row++) {
+                    for (let col = 0; col < building.windowCols; col++) {
+                        if (!building.windows[row][col].broken) {
+                            availableWindows.push({row, col});
+                        }
+                    }
+                }
+                
+                if (availableWindows.length > 0) {
+                    const spawnPoint = availableWindows[Math.floor(Math.random() * availableWindows.length)];
+                    gameState.guards.push(new Guard(building, spawnPoint.row, spawnPoint.col));
+                }
+            }
+        });
+
+        // Update items
+        gameState.items = gameState.items.filter(item => item.update());
+
+        // Spawn new items
+        gameState.buildings.forEach(building => {
+            if (building.collapsed) return;
+
+            // Only try to spawn if we don't already have an item in this building
+            if (!gameState.items.some(i => i.building === building) && 
+                Math.random() < ITEM_SPAWN_RATE) {
+                
+                // Find all available windows (unbroken and without guards)
+                let availableWindows = [];
+                for (let row = 0; row < building.windowRows; row++) {
+                    for (let col = 0; col < building.windowCols; col++) {
+                        if (!building.windows[row][col].broken && 
+                            !gameState.guards.some(g => 
+                                g.building === building && g.row === row && g.col === col)) {
+                            availableWindows.push({row, col});
+                        }
+                    }
+                }
+
+                // If we found any available windows, spawn an item in a random one
+                if (availableWindows.length > 0) {
+                    const spawnPoint = availableWindows[Math.floor(Math.random() * availableWindows.length)];
+                    gameState.items.push(new Item(building, spawnPoint.row, spawnPoint.col));
+                }
+            }
+        });
+
+        // Update tanks
+        gameState.tanks.forEach(tank => tank.update(gameState.monster));
+
+        // Spawn new tanks
+        const currentLevelConfig = LEVELS[gameState.currentLevel];
+        if (gameState.tanks.length < currentLevelConfig.maxTanks && 
+            Math.random() < currentLevelConfig.tankSpawnRate) {
+            gameState.tanks.push(new Tank());
+        }
+
+        // Check for tank damage when punching
+        if (monster.isPunching) {
+            gameState.tanks.forEach(tank => {
+                const punchX = monster.facingRight ? 
+                    monster.x + monster.width : 
+                    monster.x - monster.PUNCH_RANGE;
+                
+                if (punchX < tank.x + TANK_WIDTH && 
+                    punchX + monster.PUNCH_RANGE > tank.x && 
+                    monster.y - monster.height < tank.y + TANK_HEIGHT && 
+                    monster.y > tank.y) {
+                    tank.health--;
+                    if (tank.health <= 0) {
+                        gameState.tanks = gameState.tanks.filter(t => t !== tank);
+                    }
+                }
+            });
+        }
+
+        // Update explosions
+        gameState.explosions = gameState.explosions.filter(explosion => {
+            explosion.update();
+            return explosion.active;
+        });
+
+        // Check for level completion
+        checkLevelComplete();
+    }
+
+    function render() {
+        // Clear canvas
+        ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+        
+        // Draw night sky gradient
+        const skyGradient = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+        skyGradient.addColorStop(0, '#0B1026');  // Dark blue night sky
+        skyGradient.addColorStop(0.4, '#1B2045');  // Lighter blue
+        skyGradient.addColorStop(1, '#3B3B50');  // Light pollution glow
+        ctx.fillStyle = skyGradient;
+        ctx.fillRect(0, 0, CANVAS_WIDTH, GROUND_Y);
+        
+        // Draw moon
+        ctx.save();
+        // Moon glow
+        const moonGlow = ctx.createRadialGradient(
+            CANVAS_WIDTH - 100, 80, 30,
+            CANVAS_WIDTH - 100, 80, 60
+        );
+        moonGlow.addColorStop(0, 'rgba(255, 255, 200, 0.3)');
+        moonGlow.addColorStop(1, 'rgba(255, 255, 200, 0)');
+        ctx.fillStyle = moonGlow;
+        ctx.beginPath();
+        ctx.arc(CANVAS_WIDTH - 100, 80, 60, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Moon
+        ctx.fillStyle = '#FFF8E7';
+        ctx.beginPath();
+        ctx.arc(CANVAS_WIDTH - 100, 80, 30, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+        
+        // Draw distant burning buildings
+        for (let i = 0; i < 8; i++) {
+            const x = i * 150;
+            const height = 100 + Math.sin(i * 1.5) * 50;
+            
+            // Building silhouette
+            ctx.fillStyle = '#1A1A1A';
+            ctx.fillRect(x, GROUND_Y - height, 100, height);
+            
+            // Windows
+            ctx.fillStyle = '#3B3B3B';
+            for (let row = 0; row < 8; row++) {
+                for (let col = 0; col < 4; col++) {
+                    if (Math.random() < 0.7) {  // Some windows are dark
+                        ctx.fillRect(x + 10 + col * 25, GROUND_Y - height + 10 + row * 25, 15, 15);
+                    }
+                }
+            }
+            
+            // Fire and smoke
+            if (i % 2 === 0) {  // Only some buildings are burning
+                const time = Date.now() / 1000;
+                ctx.fillStyle = `rgba(255, ${100 + Math.sin(time + i) * 50}, 0, 0.5)`;
+                ctx.beginPath();
+                ctx.arc(x + 50, GROUND_Y - height - 20, 30, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Smoke
+                ctx.fillStyle = 'rgba(80, 80, 80, 0.3)';
+                for (let s = 0; s < 3; s++) {
+                    ctx.beginPath();
+                    ctx.arc(
+                        x + 50 + Math.sin(time + s) * 10,
+                        GROUND_Y - height - 50 - s * 20,
+                        20 + s * 5,
+                        0,
+                        Math.PI * 2
+                    );
+                    ctx.fill();
+                }
+            }
+        }
+        
+        // Draw street
+        ctx.fillStyle = '#2A2A2A';  // Dark asphalt
+        ctx.fillRect(0, GROUND_Y, CANVAS_WIDTH, CANVAS_HEIGHT - GROUND_Y);
+        
+        // Street details
+        ctx.strokeStyle = '#FFF';
+        ctx.setLineDash([30, 40]);  // Dashed line
+        ctx.beginPath();
+        ctx.moveTo(0, GROUND_Y + (CANVAS_HEIGHT - GROUND_Y) / 2);
+        ctx.lineTo(CANVAS_WIDTH, GROUND_Y + (CANVAS_HEIGHT - GROUND_Y) / 2);
+        ctx.stroke();
+        ctx.setLineDash([]);  // Reset line style
+        
+        // Add some debris and cracks in the street
+        for (let i = 0; i < 20; i++) {
+            const x = Math.random() * CANVAS_WIDTH;
+            const y = GROUND_Y + Math.random() * (CANVAS_HEIGHT - GROUND_Y);
+            ctx.fillStyle = '#1A1A1A';
+            ctx.beginPath();
+            ctx.arc(x, y, Math.random() * 5 + 2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Draw buildings
+        gameState.buildings.forEach(building => {
+            if (building.collapsed) {
+                building.updateCollapse();
+            }
+            building.render(ctx);
+        });
+
+        // Draw monster
+        gameState.monster.render(ctx);
+
+        // Draw guards and bullets
+        gameState.guards.forEach(guard => {
+            guard.render(ctx);
+        });
+
+        // Draw items
+        gameState.items.forEach(item => {
+            const windowX = item.building.x + (item.col * WINDOW_WIDTH);
+            const windowY = GROUND_Y - item.building.height + (item.row * WINDOW_HEIGHT);
+            
+            ctx.fillStyle = item.itemData.color;
+            ctx.beginPath();
+            ctx.arc(
+                windowX + WINDOW_WIDTH/2,
+                windowY + WINDOW_HEIGHT/2,
+                WINDOW_WIDTH/4,
+                0,
+                Math.PI * 2
+            );
+            ctx.fill();
+        });
+
+        // Draw health bar
+        const healthBarWidth = 200;
+        const healthBarHeight = 20;
+        ctx.fillStyle = '#333';
+        ctx.fillRect(10, 10, healthBarWidth, healthBarHeight);
+        ctx.fillStyle = '#4CAF50';
+        ctx.fillRect(10, 10, (healthBarWidth * gameState.monster.health / 100), healthBarHeight);
+
+        // Draw tanks
+        gameState.tanks.forEach(tank => {
+            tank.render(ctx);
+        });
+
+        // Draw explosions
+        gameState.explosions.forEach(explosion => {
+            explosion.render(ctx);
+        });
+
+        // Draw level number
+        ctx.fillStyle = 'white';
+        ctx.font = '18px Arial';
+        ctx.fillText(`Level ${gameState.currentLevel + 1}`, 10, 30);
+        
+        // If level complete, show message
+        if (gameState.levelComplete) {
+            ctx.fillStyle = 'black';
+            ctx.font = '40px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('Level Complete!', CANVAS_WIDTH/2, CANVAS_HEIGHT/2);
+            ctx.textAlign = 'left';  // Reset alignment
+        }
+    }
+
+    // Initialize level 0
+    initializeLevel(0);
+
+    // Start the game
+    gameLoop();
+    </script>
+</body>
+</html>

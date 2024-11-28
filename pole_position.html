@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Pseudo-3D Racing Game</title>
+    <style>
+        /* CSS styling for the canvas */
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #000;
+        }
+        #gameCanvas {
+            display: block;
+            margin: 0 auto;
+            background: #555;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+    <script>
+        // JavaScript code for the game
+
+        // Get the canvas and context
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Game settings
+        const roadWidth = 2000;
+        const segmentLength = 200;
+        const rumbleLength = 3;
+        const maxSpeed = segmentLength / 16 * 500;
+        const accel = maxSpeed / 5;
+        const braking = -maxSpeed;
+        const decel = -maxSpeed / 5;
+        const cameraDepth = 0.84; // Adjusted for better perspective
+
+        // Player car
+        const player = {
+            x: 0,
+            z: 0,
+            speed: 0
+        };
+
+        // Key controls
+        const keys = {
+            left: false,
+            right: false,
+            up: false,
+            down: false
+        };
+
+        // Event listeners for keypresses
+        document.addEventListener('keydown', (e) => {
+            if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = true;
+            if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = true;
+            if (e.code === 'ArrowUp' || e.code === 'KeyW') keys.up = true;
+            if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.down = true;
+        });
+
+        document.addEventListener('keyup', (e) => {
+            if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = false;
+            if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = false;
+            if (e.code === 'ArrowUp' || e.code === 'KeyW') keys.up = false;
+            if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.down = false;
+        });
+
+        // Road segments
+        const segments = [];
+        let position = 0;
+
+        function initRoad() {
+            for (let i = 0; i < 500; i++) {
+                segments.push({
+                    index: i,
+                    p1: { world: { y: 0, z: i * segmentLength }, camera: {}, screen: {} },
+                    p2: { world: { y: 0, z: (i + 1) * segmentLength }, camera: {}, screen: {} },
+                    curve: Math.sin(i * 0.02) * 3, // Increased amplitude and adjusted frequency for bigger turns
+                    color: (Math.floor(i / rumbleLength) % 2) ? 'darkgray' : 'gray'
+                });
+            }
+        }
+
+        function update(dt) {
+            // Update player speed
+            if (keys.up) {
+                player.speed += accel * dt;
+            } else if (keys.down) {
+                player.speed += braking * dt;
+            } else {
+                player.speed += decel * dt;
+            }
+
+            // Limit speed
+            player.speed = Math.max(0, Math.min(player.speed, maxSpeed));
+
+            // Get current road segment
+            const currentSegment = findSegment(position);
+            
+            // Handle steering
+            let steerAmount = 0;
+            if (keys.left) {
+                steerAmount = -1.5;
+            } else if (keys.right) {
+                steerAmount = 1.5;
+            }
+
+            // Update player's x position based on steering
+            // Note: player.x is no longer automatically following the road curve
+            player.x += (steerAmount * dt * player.speed / maxSpeed);
+
+            // Calculate how far off the road center the player is
+            const roadCurveOffset = currentSegment.curve * (player.speed / maxSpeed);
+            player.x += roadCurveOffset * dt; // Apply road physics force
+
+            // Check if player is off the road
+            if (Math.abs(player.x) > 1.2) { // Allow slight overflow before slowing
+                // Slow down when off the road
+                player.speed *= 0.9;
+            }
+
+            // Move player forward
+            position += player.speed * dt;
+            let trackLength = segments.length * segmentLength;
+            if (position >= trackLength) {
+                position -= trackLength;
+            } else if (position < 0) {
+                position += trackLength;
+            }
+        }
+
+        function project(p, cameraX, cameraY, cameraZ, cameraDepth) {
+            p.camera.x = p.world.x - cameraX;
+            p.camera.y = p.world.y - cameraY;
+            p.camera.z = p.world.z - cameraZ;
+
+            p.screen.scale = cameraDepth / p.camera.z;
+            p.screen.x = Math.round((canvas.width / 2) + (p.screen.scale * p.camera.x * canvas.width / 2));
+            p.screen.y = Math.round((canvas.height / 2) - (p.screen.scale * p.camera.y * canvas.height / 2));
+            p.screen.w = Math.round(p.screen.scale * roadWidth * canvas.width / 2);
+        }
+
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            let baseSegment = findSegment(position);
+            let baseIndex = baseSegment.index;
+            let basePercent = (position % segmentLength) / segmentLength;
+
+            let maxY = canvas.height;
+
+            let x = 0;
+            let dx = -(baseSegment.curve * basePercent);
+
+            // Draw road segments from the base segment
+            for (let n = 0; n < 300; n++) {
+                let segment = segments[(baseIndex + n) % segments.length];
+                segment.looped = segment.index < baseIndex;
+                segment.fog = exponentialFog(n / 300);
+
+                segment.clip = maxY;
+
+                project(segment.p1, player.x * roadWidth / 2, 1500, position, cameraDepth);
+                project(segment.p2, player.x * roadWidth / 2, 1500, position, cameraDepth);
+
+                x += dx;
+                dx += segment.curve;
+
+                segment.p1.world.x = x;
+                segment.p2.world.x = x + dx;
+
+                if (segment.p2.camera.z <= cameraDepth || segment.p2.screen.y >= segment.p1.screen.y || segment.p1.screen.y >= maxY) {
+                    continue;
+                }
+
+                drawSegment(
+                    segment.p1.screen.x,
+                    segment.p1.screen.y,
+                    segment.p1.screen.w,
+                    segment.p2.screen.x,
+                    segment.p2.screen.y,
+                    segment.p2.screen.w,
+                    segment.color
+                );
+
+                maxY = segment.p1.screen.y;
+            }
+
+            // Draw player car
+            drawPlayer();
+        }
+
+        function drawSegment(x1, y1, w1, x2, y2, w2, color) {
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.moveTo(x1 - w1, y1);
+            ctx.lineTo(x2 - w2, y2);
+            ctx.lineTo(x2 + w2, y2);
+            ctx.lineTo(x1 + w1, y1);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        function drawPlayer() {
+            const carWidth = 50;
+            const carHeight = 100;
+
+            ctx.fillStyle = 'red';
+            ctx.fillRect((canvas.width / 2) - (carWidth / 2), canvas.height - carHeight - 20, carWidth, carHeight);
+        }
+
+        function findSegment(z) {
+            return segments[Math.floor(z / segmentLength) % segments.length];
+        }
+
+        function exponentialFog(distance) {
+            const fogDensity = 5;
+            return 1 / Math.exp(distance * fogDensity);
+        }
+
+        let lastTime = null;
+
+        function frame(time) {
+            if (lastTime !== null) {
+                const dt = (time - lastTime) / 1000;
+                update(dt);
+                render();
+            }
+            lastTime = time;
+            requestAnimationFrame(frame);
+        }
+
+        initRoad();
+        requestAnimationFrame(frame);
+    </script>
+</body>
+</html>

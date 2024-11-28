@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Arkanoid Clone</title>
+    <style>
+        canvas {
+            border: 1px solid black;
+            display: block;
+            margin: 0 auto;
+            background: #000000;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// Game constants
+const PADDLE_WIDTH = 80;
+const PADDLE_HEIGHT = 15;
+const BALL_RADIUS = 8;
+const BLOCK_WIDTH = 60;
+const BLOCK_HEIGHT = 20;
+const BLOCK_PADDING = 5;
+const TOP_PADDING = 80;
+const SPEED_MULTIPLIER = 1.2;
+
+// Game state
+const game = {
+    paddle: {
+        x: canvas.width / 2 - PADDLE_WIDTH / 2,
+        y: canvas.height - 30,
+        speed: 5 * SPEED_MULTIPLIER,
+        width: PADDLE_WIDTH
+    },
+    ball: {
+        x: canvas.width / 2,
+        y: canvas.height - 50,
+        dx: 3 * SPEED_MULTIPLIER,
+        dy: -3 * SPEED_MULTIPLIER,
+        radius: BALL_RADIUS,
+        isStuck: true
+    },
+    balls: [],
+    blocks: [],
+    powerups: [],
+    particles: [],
+    score: 0,
+    lives: 3,
+    currentLevel: 0,
+    maxLevels: 36,
+    bossHits: 0,  // Track hits on final boss
+    message: null,
+    messageTimer: 0,
+    lasers: [],
+    hasLaser: false,
+    lastTime: 0,
+    powerupSpeed: 1,  // Slower base speed
+    debris: [],
+    debrisSpawnTimer: 0,
+    debrisSpawnDelay: 300  // Increased to 5 seconds (60fps * 5)
+};
+
+// Block types configuration
+const BLOCK_TYPES = {
+    WHITE:   { color: '#FFFFFF', points: 50,  hits: 1 },
+    ORANGE:  { color: '#FFA500', points: 60,  hits: 1 },
+    LTBLUE:  { color: '#ADD8E6', points: 70,  hits: 1 },
+    GREEN:   { color: '#00FF00', points: 80,  hits: 1 },
+    RED:     { color: '#FF0000', points: 90,  hits: 1 },
+    BLUE:    { color: '#0000FF', points: 100, hits: 1 },
+    PINK:    { color: '#FFC0CB', points: 110, hits: 1 },
+    YELLOW:  { color: '#FFFF00', points: 120, hits: 1 },
+    SILVER:  { 
+        color: '#C0C0C0', 
+        points: function(level) { 
+            return 50 * (level + 1); 
+        }, 
+        hits: function(level) { 
+            return 1 + Math.floor(level / 8); 
+        }
+    },
+    GOLD:    { color: '#FFD700', points: 0,   hits: Infinity }
+};
+
+// Level configurations
+const LEVELS = [
+    // Level 1 (from the FAQ's Round One)
+    {
+        layout: [
+            'SSSSSSSSSSS',
+            'RRRRRRRRRRR',
+            'BBBBBBBBBBB',
+            'YYYYYYYYYYY',
+            'PPPPPPPPPPP',
+            'GGGGGGGGGGG'
+        ]
+    },
+    // Level 2 (from the FAQ's Round Two)
+    {
+        layout: [
+            'O        ',
+            'OL       ',
+            'OLG      ',
+            'OLGB     ',
+            'OLGBR    ',
+            'OLGBRO   ',
+            'OLGBROL  ',
+            'OLGBROLG ',
+            'OLGBROLGB',
+            'SSSSSSSSSS'
+        ]
+    }
+];
+
+// Update powerup types with clearer symbols and descriptions
+const POWERUP_TYPES = {
+    ENLARGE: { 
+        color: '#000080',     // Dark Blue
+        symbol: '↔',          // Double arrow for enlarge
+        message: 'PADDLE EXTENDED!'
+    },
+    SPLIT: { 
+        color: '#ADD8E6',     // Light Blue
+        symbol: '⋔',          // Triangle for split
+        message: 'TRIPLE BALL!'
+    },
+    SLOW: { 
+        color: '#FFA500',     // Orange
+        symbol: '⊝',          // Slow symbol
+        message: 'BALL SLOWED!'
+    },
+    LIFE: { 
+        color: '#808080',     // Grey
+        symbol: '♥',          // Heart for life
+        message: 'EXTRA LIFE!'
+    },
+    CATCH: { 
+        color: '#FFFF00',     // Yellow
+        symbol: '⚡',          // Lightning for catch
+        message: 'STICKY PADDLE!'
+    },
+    ESCAPE: { 
+        color: '#FFC0CB',     // Pink
+        symbol: '⎋',          // Escape symbol
+        message: 'ESCAPE ROUTE OPENED!'
+    },
+    LASER: {
+        color: '#FF0000',     // Red
+        symbol: '⚡',          // Lightning bolt
+        message: 'LASER POWER!'
+    }
+};
+
+// Add these gradient and glow configurations after the POWERUP_TYPES
+const VISUAL_EFFECTS = {
+    paddleGradient: ctx.createLinearGradient(0, canvas.height - 30, 0, canvas.height - 30 + PADDLE_HEIGHT),
+    ballGlow: {
+        color: '#ff4444',
+        blur: 15
+    },
+    blockGlow: {
+        blur: 8
+    },
+    backgroundStars: Array.from({length: 50}, () => ({
+        x: Math.random() * canvas.width,
+        y: Math.random() * canvas.height,
+        size: Math.random() * 2,
+        speed: 0.2 + Math.random() * 0.5
+    }))
+};
+
+// Initialize gradients
+VISUAL_EFFECTS.paddleGradient.addColorStop(0, '#888');
+VISUAL_EFFECTS.paddleGradient.addColorStop(0.5, '#eee');
+VISUAL_EFFECTS.paddleGradient.addColorStop(1, '#666');
+
+function createLevel(levelNum) {
+    game.currentLevel = levelNum;
+    game.blocks = [];
+    const level = LEVELS[levelNum % LEVELS.length];
+    
+    level.layout.forEach((row, rowIndex) => {
+        [...row].forEach((block, colIndex) => {
+            if (block === ' ') return;
+            
+            const blockType = BLOCK_TYPES[Object.keys(BLOCK_TYPES).find(key => key[0] === block)];
+            game.blocks.push({
+                x: colIndex * (BLOCK_WIDTH + BLOCK_PADDING) + BLOCK_PADDING,
+                y: rowIndex * (BLOCK_HEIGHT + BLOCK_PADDING) + BLOCK_PADDING + TOP_PADDING,
+                width: BLOCK_WIDTH,
+                height: BLOCK_HEIGHT,
+                type: blockType,
+                hits: typeof blockType.hits === 'function' ? blockType.hits(levelNum) : blockType.hits
+            });
+        });
+    });
+}
+
+function drawGame() {
+    // Clear canvas with a dark background
+    ctx.fillStyle = '#000012';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw animated stars
+    drawStars();
+    
+    // Draw UI elements
+    drawUI();
+    
+    // Draw balls with glow effect
+    [game.ball, ...game.balls].forEach(ball => {
+        ctx.save();
+        ctx.shadowColor = VISUAL_EFFECTS.ballGlow.color;
+        ctx.shadowBlur = VISUAL_EFFECTS.ballGlow.blur;
+        
+        // Inner glow
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+        ctx.fillStyle = '#ff8888';
+        ctx.fill();
+        
+        // Outer circle
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, ball.radius - 2, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        
+        ctx.restore();
+    });
+    
+    // Draw paddle with gradient and glow
+    ctx.save();
+    ctx.shadowColor = '#4488ff';
+    ctx.shadowBlur = 10;
+    ctx.fillStyle = VISUAL_EFFECTS.paddleGradient;
+    ctx.fillRect(game.paddle.x, game.paddle.y, game.paddle.width, PADDLE_HEIGHT);
+    
+    // Add metallic shine to paddle
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+    ctx.fillRect(game.paddle.x, game.paddle.y, game.paddle.width, PADDLE_HEIGHT / 3);
+    ctx.restore();
+    
+    // Draw blocks with enhanced styling
+    game.blocks.forEach(block => {
+        ctx.save();
+        ctx.shadowColor = block.type.color;
+        ctx.shadowBlur = VISUAL_EFFECTS.blockGlow.blur;
+        
+        // Create gradient for each block
+        const blockGradient = ctx.createLinearGradient(
+            block.x, block.y,
+            block.x, block.y + block.height
+        );
+        blockGradient.addColorStop(0, block.type.color);
+        blockGradient.addColorStop(0.5, '#ffffff');
+        blockGradient.addColorStop(1, block.type.color);
+        
+        ctx.fillStyle = blockGradient;
+        ctx.fillRect(block.x, block.y, block.width, block.height);
+        
+        // Add metallic border
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(block.x, block.y, block.width, block.height);
+        
+        ctx.restore();
+    });
+
+    // Draw particles
+    const remainingParticles = [];
+    for (const particle of game.particles) {
+        particle.x += particle.dx;
+        particle.y += particle.dy;
+        particle.life--;
+        
+        if (particle.life > 0) {
+            ctx.fillStyle = particle.color;
+            ctx.globalAlpha = particle.life / 30;
+            ctx.fillRect(particle.x, particle.y, particle.size, particle.size);
+            ctx.globalAlpha = 1.0;
+            remainingParticles.push(particle);
+        }
+    }
+    game.particles = remainingParticles;
+
+    // Draw powerups with improved visuals
+    game.powerups.forEach(powerup => {
+        // Draw powerup background with glow effect
+        ctx.shadowColor = powerup.type.color;
+        ctx.shadowBlur = 10;
+        ctx.fillStyle = powerup.type.color;
+        ctx.fillRect(powerup.x, powerup.y, powerup.width, powerup.height);
+        
+        // Draw white border
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.strokeRect(powerup.x, powerup.y, powerup.width, powerup.height);
+        
+        // Draw symbol
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 14px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(powerup.type.symbol, 
+            powerup.x + powerup.width/2, 
+            powerup.y + powerup.height/2);
+    });
+
+    // Draw powerup message if active
+    if (game.message && game.messageTimer > 0) {
+        ctx.font = 'bold 24px Arial';
+        ctx.fillStyle = '#FFFFFF';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        
+        // Make message fade out
+        ctx.globalAlpha = game.messageTimer / 60;
+        ctx.fillText(game.message, canvas.width/2, canvas.height/2);
+        ctx.globalAlpha = 1.0;
+        
+        game.messageTimer--;
+    }
+
+    // Draw lasers
+    if (game.hasLaser) {
+        // Draw laser power indicator
+        ctx.fillStyle = '#FF0000';
+        ctx.fillRect(game.paddle.x + 5, game.paddle.y + 5, 5, 5);
+        ctx.fillRect(game.paddle.x + game.paddle.width - 10, game.paddle.y + 5, 5, 5);
+    }
+
+    // Draw active lasers
+    ctx.fillStyle = '#FF0000';
+    game.lasers.forEach(laser => {
+        ctx.fillRect(laser.x, laser.y, laser.width, laser.height);
+    });
+
+    // Draw debris
+    ctx.fillStyle = '#888888';
+    game.debris.forEach(debris => {
+        ctx.beginPath();
+        ctx.arc(debris.x, debris.y, debris.size/2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.closePath();
+    });
+}
+
+function drawUI() {
+    ctx.save();
+    
+    // Add gradient text effect
+    const scoreGradient = ctx.createLinearGradient(0, 0, 0, 40);
+    scoreGradient.addColorStop(0, '#ffffff');
+    scoreGradient.addColorStop(1, '#88aaff');
+    
+    ctx.font = 'bold 24px Arial';
+    ctx.fillStyle = scoreGradient;
+    ctx.shadowColor = '#4488ff';
+    ctx.shadowBlur = 10;
+    
+    // Draw score with enhanced styling
+    ctx.textAlign = 'left';
+    ctx.fillText(`Score: ${game.score}`, 20, 30);
+    
+    // Draw lives with heart symbols
+    const lives = '♥'.repeat(game.lives);
+    ctx.fillStyle = '#ff4444';
+    ctx.fillText(lives, 20, 60);
+    
+    // Draw level with glowing effect
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#88ffaa';
+    ctx.fillText(`Level ${Math.floor(game.currentLevel + 1)}`, canvas.width - 20, 30);
+    
+    ctx.restore();
+}
+
+function update(deltaTime) {
+    // Move paddle
+    if (keys.ArrowLeft && game.paddle.x > 0) {
+        game.paddle.x -= game.paddle.speed;
+    }
+    if (keys.ArrowRight && game.paddle.x < canvas.width - game.paddle.width) {
+        game.paddle.x += game.paddle.speed;
+    }
+    
+    // Update all balls
+    [game.ball, ...game.balls].forEach((ball, index) => {
+        if (!ball.isStuck) {
+            ball.x += ball.dx;
+            ball.y += ball.dy;
+            
+            // Wall collisions
+            if (ball.x + ball.radius > canvas.width || ball.x - ball.radius < 0) {
+                ball.dx *= -1;
+            }
+            if (ball.y - ball.radius < 0) {
+                ball.dy *= -1;
+            }
+            
+            // Block collisions
+            for (let i = game.blocks.length - 1; i >= 0; i--) {
+                const block = game.blocks[i];
+                if (ball.x > block.x && 
+                    ball.x < block.x + block.width &&
+                    ball.y > block.y && 
+                    ball.y < block.y + block.height) {
+                    
+                    if (block.hits !== Infinity) {
+                        block.hits--;
+                        if (block.hits <= 0) {
+                            createBlockBreakEffect(block);
+                            game.blocks.splice(i, 1);
+                            game.score += typeof block.type.points === 'function' ? 
+                                block.type.points(game.currentLevel) : block.type.points;
+                        }
+                    }
+                    ball.dy *= -1;
+                    break;
+                }
+            }
+            
+            // Paddle collision
+            if (ball.y + ball.radius > game.paddle.y &&
+                ball.x > game.paddle.x && 
+                ball.x < game.paddle.x + game.paddle.width) {
+                
+                if (game.paddle.sticky) {
+                    ball.isStuck = true;
+                } else {
+                    const hitPos = (ball.x - game.paddle.x) / game.paddle.width;
+                    const angle = (hitPos - 0.5) * Math.PI * 2/3;
+                    const speed = Math.sqrt(ball.dx * ball.dx + ball.dy * ball.dy);
+                    ball.dx = speed * Math.sin(angle);
+                    ball.dy = -speed * Math.cos(angle);
+                }
+            }
+            
+            // Update powerups with fixed speed
+            for (let i = game.powerups.length - 1; i >= 0; i--) {
+                const powerup = game.powerups[i];
+                powerup.y += 2; // Fixed speed, no multiplier
+                
+                // Check for paddle collision
+                if (powerup.y + powerup.height > game.paddle.y &&
+                    powerup.x + powerup.width > game.paddle.x &&
+                    powerup.x < game.paddle.x + game.paddle.width) {
+                    
+                    // Apply powerup effect
+                    applyPowerup(powerup);
+                    game.powerups.splice(i, 1);
+                }
+                
+                // Remove if fallen off screen
+                if (powerup.y > canvas.height) {
+                    game.powerups.splice(i, 1);
+                }
+            }
+            
+            // Ball out of bounds
+            if (ball.y + ball.radius > canvas.height) {
+                if (index === 0) {
+                    // Main ball
+                    if (game.balls.length === 0) {
+                        // Only lose life if this is the last ball
+                        game.lives--;
+                        if (game.lives <= 0) {
+                            alert('Game Over!');
+                            document.location.reload();
+                        } else {
+                            resetBall();
+                        }
+                    } else {
+                        // Just remove the main ball if we have others
+                        game.ball = game.balls.shift(); // Take first extra ball as new main ball
+                    }
+                } else {
+                    // Extra ball from split powerup
+                    game.balls.splice(index - 1, 1);
+                }
+            }
+        }
+    });
+
+    // Update powerups with fixed time step
+    game.powerups.forEach((powerup, i) => {
+        powerup.y += game.powerupSpeed * (deltaTime / 16.67); // 60 FPS normalized
+    });
+
+    // Clean up powerups in separate loop to avoid modification during iteration
+    for (let i = game.powerups.length - 1; i >= 0; i--) {
+        const powerup = game.powerups[i];
+        
+        // Check for paddle collision
+        if (powerup.y + powerup.height > game.paddle.y &&
+            powerup.x + powerup.width > game.paddle.x &&
+            powerup.x < game.paddle.x + game.paddle.width) {
+            
+            // Apply powerup effect
+            applyPowerup(powerup);
+            game.powerups.splice(i, 1);
+        }
+        
+        // Remove if fallen off screen
+        if (powerup.y > canvas.height) {
+            game.powerups.splice(i, 1);
+        }
+    }
+
+    // Update lasers
+    for (let i = game.lasers.length - 1; i >= 0; i--) {
+        const laser = game.lasers[i];
+        laser.y += laser.dy;
+
+        // Check for block collisions
+        for (let j = game.blocks.length - 1; j >= 0; j--) {
+            const block = game.blocks[j];
+            if (laser.x > block.x && 
+                laser.x < block.x + block.width &&
+                laser.y > block.y && 
+                laser.y < block.y + block.height) {
+                
+                if (block.hits !== Infinity) {
+                    block.hits--;
+                    if (block.hits <= 0) {
+                        createBlockBreakEffect(block);
+                        game.blocks.splice(j, 1);
+                        game.score += typeof block.type.points === 'function' ? 
+                            block.type.points(game.currentLevel) : block.type.points;
+                    }
+                }
+                game.lasers.splice(i, 1);
+                break;
+            }
+        }
+
+        // Remove lasers that are off screen
+        if (laser.y < 0) {
+            game.lasers.splice(i, 1);
+        }
+    }
+
+    // Update debris spawn timer
+    game.debrisSpawnTimer++;
+    if (game.debrisSpawnTimer >= game.debrisSpawnDelay) {
+        spawnDebris();
+        game.debrisSpawnTimer = 0;
+    }
+
+    // Update existing debris
+    for (let i = game.debris.length - 1; i >= 0; i--) {
+        const debris = game.debris[i];
+        
+        // Move debris with reduced gravity
+        debris.x += debris.dx;
+        debris.y += debris.dy;
+        
+        // Reduced gravity effect
+        debris.dy += 0.02; // Reduced from 0.05
+        
+        // Check for paddle collision
+        if (debris.y + debris.size > game.paddle.y &&
+            debris.x + debris.size > game.paddle.x &&
+            debris.x < game.paddle.x + game.paddle.width) {
+            // Destroy paddle (lose life)
+            game.lives--;
+            if (game.lives <= 0) {
+                alert('Game Over!');
+                document.location.reload();
+            } else {
+                resetBall();
+            }
+            game.debris.splice(i, 1);
+            continue;
+        }
+        
+        // Check for ball collisions
+        [game.ball, ...game.balls].forEach(ball => {
+            if (!ball.isStuck) {
+                const dx = ball.x - debris.x;
+                const dy = ball.y - debris.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                
+                if (dist < ball.radius + debris.size/2) {
+                    // Destroy debris
+                    game.debris.splice(i, 1);
+                    // Add points
+                    game.score += 100;
+                    return;
+                }
+            }
+        });
+        
+        // Remove if off screen (added side boundaries)
+        if (debris.y > canvas.height || debris.x < 0 || debris.x > canvas.width) {
+            game.debris.splice(i, 1);
+        }
+    }
+
+    // Check for level completion
+    if (game.blocks.length === 0) {
+        if (game.currentLevel < game.maxLevels - 1) {
+            // Normal level completion
+            game.currentLevel++;
+            createLevel(game.currentLevel);
+            resetBall();
+        } else if (game.currentLevel === game.maxLevels - 1 && game.bossHits >= 16) {
+            // Boss defeated
+            alert('Congratulations! You beat the game!');
+            document.location.reload();
+        }
+    }
+}
+
+function resetBall() {
+    game.ball.isStuck = true;
+    game.ball.dx = 3 * SPEED_MULTIPLIER;
+    game.ball.dy = -3 * SPEED_MULTIPLIER;
+}
+
+// Simplify particle creation
+function createBlockBreakEffect(block) {
+    // Create particles
+    for (let i = 0; i < 8; i++) {
+        game.particles.push({
+            x: block.x + block.width/2,
+            y: block.y + block.height/2,
+            dx: (Math.random() - 0.5) * 4,
+            dy: (Math.random() - 0.5) * 4,
+            size: 3,
+            color: block.type.color,
+            life: 30
+        });
+    }
+    
+    // Create powerup with reduced spawn chance (changed from 0.75 to 0.15 - 15% chance)
+    if (Math.random() < 0.15) {
+        const types = Object.values(POWERUP_TYPES);
+        const powerup = types[Math.floor(Math.random() * types.length)];
+        game.powerups.push({
+            x: block.x + block.width/2,
+            y: block.y + block.height/2,
+            width: 20,
+            height: 10,
+            dy: 2,
+            type: powerup
+        });
+    }
+}
+
+// Update powerup application to show messages
+function applyPowerup(powerup) {
+    // Show message
+    game.message = powerup.type.message;
+    game.messageTimer = 60;
+    
+    switch(powerup.type) {
+        case POWERUP_TYPES.SPLIT:
+            console.log('Before split - balls:', game.balls.length); // Debug log
+            
+            // Create two additional balls with wider angles
+            const speed = Math.sqrt(game.ball.dx * game.ball.dx + game.ball.dy * game.ball.dy);
+            
+            // Left ball (-45 degrees)
+            game.balls.push({
+                x: game.ball.x,
+                y: game.ball.y,
+                dx: -speed * 0.7071, // cos(45°)
+                dy: -speed * 0.7071, // sin(45°)
+                radius: BALL_RADIUS,
+                isStuck: false
+            });
+            
+            // Right ball (+45 degrees)
+            game.balls.push({
+                x: game.ball.x,
+                y: game.ball.y,
+                dx: speed * 0.7071,  // cos(45°)
+                dy: -speed * 0.7071, // sin(45°)
+                radius: BALL_RADIUS,
+                isStuck: false
+            });
+            
+            console.log('After split - balls:', game.balls.length); // Debug log
+            break;
+        case POWERUP_TYPES.ENLARGE:
+            game.paddle.width = PADDLE_WIDTH * 2;
+            setTimeout(() => game.paddle.width = PADDLE_WIDTH, 10000); // Reset after 10s
+            break;
+        case POWERUP_TYPES.SLOW:
+            const currentSpeed = Math.sqrt(game.ball.dx * game.ball.dx + game.ball.dy * game.ball.dy);
+            game.ball.dx *= 0.5;
+            game.ball.dy *= 0.5;
+            setTimeout(() => {
+                game.ball.dx *= 2;
+                game.ball.dy *= 2;
+            }, 10000); // Reset after 10s
+            break;
+        case POWERUP_TYPES.LIFE:
+            game.lives++;
+            break;
+        case POWERUP_TYPES.CATCH:
+            game.paddle.sticky = true;
+            setTimeout(() => game.paddle.sticky = false, 10000); // Reset after 10s
+            break;
+        case POWERUP_TYPES.ESCAPE:
+            // TODO: Implement escape route
+            break;
+        case POWERUP_TYPES.LASER:
+            game.hasLaser = true;
+            setTimeout(() => game.hasLaser = false, 10000); // Reset after 10s
+            break;
+    }
+}
+
+// Update debris spawning function
+function spawnDebris() {
+    // Spawn in groups of three with varied trajectories
+    for (let i = 0; i < 3; i++) {
+        const angle = (Math.random() * Math.PI / 2) + Math.PI / 4; // 45° to 135°
+        const speed = 0.8 + Math.random() * 0.8; // Reduced speed between 0.8 and 1.6
+        
+        game.debris.push({
+            x: Math.random() * (canvas.width - 20) + 10,
+            y: 0,
+            size: 10,
+            dx: Math.cos(angle) * speed,
+            dy: Math.sin(angle) * speed,
+            color: '#888888'
+        });
+    }
+}
+
+// Input handling
+const keys = {};
+document.addEventListener('keydown', e => keys[e.key] = true);
+document.addEventListener('keyup', e => keys[e.key] = false);
+document.addEventListener('keypress', e => {
+    if (e.key === ' ' && game.ball.isStuck) {
+        game.ball.isStuck = false;
+    }
+});
+
+// Add laser shooting on 'A' key press
+document.addEventListener('keydown', e => {
+    if (e.key === 'a' || e.key === 'A') {
+        if (game.hasLaser) {
+            // Create two lasers at paddle edges
+            game.lasers.push(
+                {
+                    x: game.paddle.x + 10,
+                    y: game.paddle.y,
+                    width: 2,
+                    height: 10,
+                    dy: -5
+                },
+                {
+                    x: game.paddle.x + game.paddle.width - 10,
+                    y: game.paddle.y,
+                    width: 2,
+                    height: 10,
+                    dy: -5
+                }
+            );
+        }
+    }
+});
+
+// Game loop
+function gameLoop(currentTime) {
+    if (!game.lastTime) {
+        game.lastTime = currentTime;
+    }
+    const deltaTime = currentTime - game.lastTime;
+    game.lastTime = currentTime;
+
+    update(deltaTime);
+    drawGame();
+    requestAnimationFrame(gameLoop);
+}
+
+// Start game
+createLevel(0);
+requestAnimationFrame(gameLoop);
+
+// Add new function to draw animated background stars
+function drawStars() {
+    VISUAL_EFFECTS.backgroundStars.forEach(star => {
+        ctx.save();
+        ctx.fillStyle = `rgba(255, 255, 255, ${0.3 + Math.random() * 0.7})`;
+        ctx.fillRect(star.x, star.y, star.size, star.size);
+        ctx.restore();
+        
+        // Animate stars
+        star.y += star.speed;
+        if (star.y > canvas.height) {
+            star.y = 0;
+            star.x = Math.random() * canvas.width;
+        }
+    });
+}
+    </script>
+</body>
+</html>

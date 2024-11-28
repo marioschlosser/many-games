@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Rampage Clone</title>
+    <style>
+        canvas {
+            border: 1px solid black;
+            background: skyblue;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    <script>
+        // ============= CONSTANTS =============
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        const PHYSICS = {
+            GRAVITY: 0.5,
+            JUMP_FORCE: -15,
+            CLIMB_SPEED: 5,
+            MOVE_SPEED: 5,
+            EDGE_SNAP_DISTANCE: 20
+        };
+
+        const MONSTER = {
+            WIDTH: 40,
+            HEIGHT: 60,
+            PUNCH_COOLDOWN: 250,
+            PUNCH_RANGE: 30,
+            ANIMATIONS: {
+                PUNCH: {
+                    frames: [
+                        { armOffset: 0, armAngle: 0 },    // Ready
+                        { armOffset: 10, armAngle: -0.2 }, // Wind up
+                        { armOffset: 30, armAngle: 0 },   // Extended punch
+                        { armOffset: 20, armAngle: 0.1 }, // Follow through
+                        { armOffset: 0, armAngle: 0 }     // Return
+                    ],
+                    frameRate: 50
+                }
+            }
+        };
+
+        const BUILDING = {
+            WIDTH: 120,
+            WINDOW_SIZE: 20,
+            COLLAPSE_THRESHOLD: 30,
+            TYPES: {
+                SMALL: { floors: 4, width: 120 },
+                MEDIUM: { floors: 6, width: 120 },
+                LARGE: { floors: 8, width: 120 }
+            }
+        };
+
+        const GUARD = {
+            WIDTH: 20,
+            HEIGHT: 20,
+            SHOOT_RANGE: 300,
+            SHOOT_COOLDOWN: 3000,
+            SHOOT_DELAY: 3000,
+            PROJECTILE_SPEED: 2,
+            PROJECTILE_GRAVITY: 0.05,
+            APPEAR_CHANCE: 0.3,
+            DAMAGE: 10,
+            STATES: {
+                HIDDEN: 'hidden',
+                SHOOTING: 'shooting',
+                THROWING: 'throwing'
+            }
+        };
+
+        const TANK = {
+            WIDTH: 60,
+            HEIGHT: 30,
+            SPEED: 0.5,
+            SHOOT_COOLDOWN: 3000,
+            PROJECTILE_SPEED: 4,
+            DAMAGE: 20,
+            KNOCKBACK: 15,
+            POINTS: 1000,
+            PROJECTILE_GRAVITY: 0.05
+        };
+
+        const ITEMS = {
+            SIZE: 20,
+            TYPES: {
+                FOOD: {
+                    type: 'food',
+                    items: ['turkey', 'milk', 'fruit', 'hamburger', 'toast'],
+                    health: 20,
+                    score: 175
+                },
+                HAZARD: {
+                    type: 'hazard',
+                    items: ['cactus', 'poison', 'dynamite', 'tv_on', 'toaster_empty'],
+                    damage: 15,
+                    score: 0
+                },
+                BONUS: {
+                    type: 'bonus',
+                    items: ['tv_off', 'flower_pot', 'safe'],
+                    score: 500
+                }
+            }
+        };
+
+        // ============= GAME STATE =============
+        const gameState = {
+            monster: {
+                x: 100,
+                y: 500,
+                vx: 0,
+                vy: 0,
+                isClimbing: false,
+                facingRight: true,
+                currentBuilding: null,
+                lastPunchTime: 0,
+                health: 100,
+                score: 0,
+                punchFrame: 0,
+                punchAnimationTimer: 0,
+                isPunching: false
+            },
+            currentDay: 1,
+            currentCity: null,
+            monstersAlive: true,
+            score: 0,
+            buildings: [],
+            tanks: [],
+            projectiles: [],
+            lastTime: 0
+        };
+
+        // Input handling
+        const keys = {};
+        document.addEventListener('keydown', e => keys[e.key] = true);
+        document.addEventListener('keyup', e => keys[e.key] = false);
+        // ============= CORE GAME MECHANICS =============
+        
+        // Physics and Movement
+        function updatePhysics(monster) {
+            if (!monster.isClimbing) {
+                let onSurface = false;
+                
+                // Check if standing on a building
+                gameState.buildings.forEach(building => {
+                    if (building.destroyed) return;
+                    
+                    const onBuildingTop = 
+                        monster.y === building.y && 
+                        monster.x + MONSTER.WIDTH > building.x && 
+                        monster.x < building.x + building.width;
+                        
+                    if (onBuildingTop) {
+                        onSurface = true;
+                    }
+                });
+                
+                // Apply gravity only if not on any surface
+                if (!onSurface) {
+                    monster.vy += PHYSICS.GRAVITY;
+                    
+                    // Ground collision
+                    if (monster.y + MONSTER.HEIGHT >= canvas.height - 100) {
+                        monster.y = canvas.height - 100 - MONSTER.HEIGHT;
+                        monster.vy = 0;
+                    }
+                }
+            }
+        }
+
+        function handleMovement(monster) {
+            if (!monster.isClimbing) {
+                if (keys.ArrowLeft) {
+                    monster.vx = -PHYSICS.MOVE_SPEED;
+                    monster.facingRight = false;
+                } else if (keys.ArrowRight) {
+                    monster.vx = PHYSICS.MOVE_SPEED;
+                    monster.facingRight = true;
+                } else {
+                    monster.vx = 0;
+                }
+            }
+
+            // Apply velocities
+            monster.x += monster.vx;
+            monster.y += monster.vy;
+
+            // Screen boundaries
+            monster.x = Math.max(0, Math.min(canvas.width - MONSTER.WIDTH, monster.x));
+        }
+
+        // Climbing System
+        function checkClimbing(monster) {
+            let canClimb = false;
+            let nearestBuilding = null;
+            
+            gameState.buildings.forEach(building => {
+                if (building.destroyed) return;
+                
+                // Debug: draw climbing detection zone
+                ctx.strokeStyle = 'yellow';
+                ctx.strokeRect(
+                    building.x - PHYSICS.EDGE_SNAP_DISTANCE,
+                    building.y,
+                    PHYSICS.EDGE_SNAP_DISTANCE * 2,
+                    10
+                );
+                
+                const nearLeftEdge = Math.abs(monster.x + MONSTER.WIDTH - building.x) < PHYSICS.EDGE_SNAP_DISTANCE;
+                const nearRightEdge = Math.abs(monster.x - (building.x + building.width)) < PHYSICS.EDGE_SNAP_DISTANCE;
+                
+                // More precise top detection
+                const monsterBottom = monster.y + MONSTER.HEIGHT;
+                const isNearTop = Math.abs(monsterBottom - building.y) < MONSTER.HEIGHT;
+                
+                if ((nearLeftEdge || nearRightEdge) && 
+                    monsterBottom >= building.y && 
+                    monster.y <= building.y + building.height) {
+                    
+                    canClimb = true;
+                    nearestBuilding = building;
+                    
+                    // Handle reaching the top
+                    if (isNearTop && monster.isClimbing) {
+                        console.log('Reaching top:', {
+                            monsterY: monster.y,
+                            buildingY: building.y,
+                            difference: Math.abs(monsterBottom - building.y)
+                        });
+                        
+                        monster.y = building.y - MONSTER.HEIGHT;  // Place monster ON the building
+                        monster.isClimbing = false;
+                        monster.vy = 0;
+                        
+                        if (nearLeftEdge) {
+                            monster.x = building.x;
+                        } else {
+                            monster.x = building.x + building.width - MONSTER.WIDTH;
+                        }
+                        return;
+                    }
+                }
+            });
+            
+            // Start climbing when pressing up near a building
+            if (canClimb && keys.ArrowUp && !monster.isClimbing) {
+                monster.isClimbing = true;
+                monster.currentBuilding = nearestBuilding;
+            }
+            
+            // Stop climbing only if we're no longer near a building
+            if (!canClimb && monster.isClimbing) {
+                monster.isClimbing = false;
+                monster.currentBuilding = null;
+            }
+            
+            // Handle climbing movement
+            if (monster.isClimbing) {
+                monster.vx = 0;
+                if (keys.ArrowUp) {
+                    monster.vy = -PHYSICS.CLIMB_SPEED;
+                } else if (keys.ArrowDown) {
+                    monster.vy = PHYSICS.CLIMB_SPEED;
+                } else {
+                    monster.vy = 0;  // Stay in place when no vertical input
+                }
+            }
+        }
+
+        // Projectile System
+        function updateProjectiles(monster) {
+            if (!gameState.projectiles) return;
+            
+            gameState.projectiles = gameState.projectiles.filter(proj => {
+                // Update position with floating point precision
+                if (proj.realX !== undefined) {
+                    proj.realX += proj.vx;
+                    proj.realY += proj.vy;
+                    proj.x = Math.round(proj.realX);
+                    proj.y = Math.round(proj.realY);
+                } else {
+                    proj.realX = proj.x;
+                    proj.realY = proj.y;
+                }
+                
+                // Add gravity for tank projectiles
+                if (proj.type === 'tank') {
+                    proj.vy += TANK.PROJECTILE_GRAVITY;
+                }
+                
+                // Check collisions
+                if (checkProjectileMonsterCollision(proj, monster)) {
+                    monster.health -= proj.fromGuard ? GUARD.DAMAGE : TANK.DAMAGE;
+                    if (proj.type === 'tank') {
+                        monster.vx = (proj.vx > 0 ? 1 : -1) * TANK.KNOCKBACK;
+                    }
+                    return false;
+                }
+                
+                // Remove if off screen
+                return proj.x > 0 && proj.x < canvas.width && 
+                       proj.y > 0 && proj.y < canvas.height;
+            });
+        }
+
+        function createProjectile(source, target, type) {
+            const dx = target.x - source.x;
+            const dy = target.y - source.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            
+            return {
+                realX: source.x,
+                realY: source.y,
+                x: source.x,
+                y: source.y,
+                vx: (dx / distance) * (type === 'guard' ? GUARD.PROJECTILE_SPEED : TANK.PROJECTILE_SPEED),
+                vy: (dy / distance) * (type === 'guard' ? GUARD.PROJECTILE_SPEED : TANK.PROJECTILE_SPEED),
+                type: type,
+                fromGuard: type === 'guard'
+            };
+        }
+
+        // Collision Detection
+        function checkProjectileMonsterCollision(proj, monster) {
+            const punchX = monster.facingRight ? monster.x + MONSTER.WIDTH : monster.x;
+            return Math.abs(punchX - proj.x) < MONSTER.PUNCH_RANGE && 
+                   Math.abs(monster.y + MONSTER.HEIGHT/2 - proj.y) < MONSTER.PUNCH_RANGE;
+        }
+        // ============= ENEMY SYSTEMS =============
+        
+        // Guard System
+        function updateGuards(monster) {
+            gameState.buildings.forEach(building => {
+                // First check if monster is near this building
+                const buildingCenterX = building.x + (building.width / 2);
+                const distanceToBuilding = Math.abs(monster.x - buildingCenterX);
+                
+                // Only activate guards if monster is near this building
+                if (distanceToBuilding > BUILDING.WIDTH * 2) return;
+                
+                building.guards.forEach(guard => {
+                    if (guard.window.damaged) return;
+                    
+                    const now = Date.now();
+                    // Initialize random delay between 1-3 seconds
+                    if (!guard.shootDelay) {
+                        guard.shootDelay = GUARD.SHOOT_DELAY + (Math.random() * 3000);
+                    }
+                    
+                    if (now - guard.lastShootTime > GUARD.SHOOT_COOLDOWN + guard.shootDelay) {
+                        const dx = monster.x - guard.x;
+                        const dy = monster.y - guard.y;
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+                        
+                        if (distance < GUARD.SHOOT_RANGE) {
+                            if (!gameState.projectiles) {
+                                gameState.projectiles = [];
+                            }
+                            
+                            // Only shoot if monster is in front of the window
+                            const monsterIsInFront = (dx > 0 && monster.x > guard.x) || 
+                                                   (dx < 0 && monster.x < guard.x);
+                            
+                            if (monsterIsInFront) {
+                                gameState.projectiles.push(
+                                    createProjectile(
+                                        {
+                                            x: guard.x + GUARD.WIDTH/2,
+                                            y: guard.y + GUARD.HEIGHT/2
+                                        },
+                                        monster,
+                                        'guard'
+                                    )
+                                );
+                                
+                                guard.lastShootTime = now;
+                                // After shooting, set new random delay
+                                guard.shootDelay = GUARD.SHOOT_DELAY + (Math.random() * 3000);
+                            }
+                        }
+                    }
+                });
+            });
+        }
+
+        // Tank System
+        function updateTanks() {
+            gameState.tanks.forEach(tank => {
+                if (tank.destroyed) return;
+                
+                // Move tank
+                tank.x += TANK.SPEED * tank.direction;
+                tank.y = canvas.height - TANK.HEIGHT - 100;
+                
+                // Screen edge behavior
+                if (tank.x <= 50) {
+                    tank.direction = 1;
+                    tank.x = 50;
+                } else if (tank.x + TANK.WIDTH >= canvas.width - 50) {
+                    tank.direction = -1;
+                    tank.x = canvas.width - TANK.WIDTH - 50;
+                }
+                
+                // Shooting logic
+                const now = Date.now();
+                if (now - tank.lastShootTime > TANK.SHOOT_COOLDOWN) {
+                    const distanceToMonster = Math.abs(tank.x - gameState.monster.x);
+                    if (distanceToMonster < 300) {
+                        if (!gameState.projectiles) gameState.projectiles = [];
+                        
+                        // Calculate arc trajectory
+                        const angle = Math.PI * 0.75;  // 45 degrees up
+                        const speed = TANK.PROJECTILE_SPEED;
+                        
+                        gameState.projectiles.push({
+                            realX: tank.x + TANK.WIDTH/2,
+                            realY: tank.y,
+                            x: tank.x + TANK.WIDTH/2,
+                            y: tank.y,
+                            vx: tank.direction * speed * Math.cos(angle),
+                            vy: speed * Math.sin(angle),
+                            type: 'tank'
+                        });
+                        
+                        tank.lastShootTime = now;
+                    }
+                }
+            });
+        }
+
+        // Combat System
+        function handleCombat(monster) {
+            const now = Date.now();
+            
+            // Punching
+            if (keys.x && now - monster.lastPunchTime > MONSTER.PUNCH_COOLDOWN) {
+                monster.isPunching = true;
+                monster.punchFrame = 0;
+                monster.punchAnimationTimer = now;
+                monster.lastPunchTime = now;
+                
+                // Check for punch hits
+                checkPunchHits(monster);
+            }
+            
+            // Update punch animation
+            if (monster.isPunching) {
+                if (now - monster.punchAnimationTimer > MONSTER.ANIMATIONS.PUNCH.frameRate) {
+                    monster.punchFrame++;
+                    monster.punchAnimationTimer = now;
+                    
+                    if (monster.punchFrame >= MONSTER.ANIMATIONS.PUNCH.frames.length) {
+                        monster.isPunching = false;
+                        monster.punchFrame = 0;
+                    }
+                }
+            }
+        }
+
+        function checkPunchHits(monster) {
+            // Check building damage
+            gameState.buildings.forEach(building => {
+                if (building.destroyed) return;
+                
+                building.windows.forEach(window => {
+                    if (isPunchingWindow(monster, window)) {
+                        damageWindow(window);
+                        checkBuildingHealth(building);
+                    }
+                });
+            });
+            
+            // Check tank damage
+            gameState.tanks.forEach(tank => {
+                if (tank.destroyed) return;
+                
+                if (isPunchingTank(monster, tank)) {
+                    tank.destroyed = true;
+                    monster.score += TANK.POINTS;
+                }
+            });
+        }
+
+        function isPunchingWindow(monster, window) {
+            const punchStartX = monster.facingRight ? 
+                monster.x + MONSTER.WIDTH : 
+                monster.x - MONSTER.PUNCH_RANGE;
+                
+            const punchEndX = monster.facingRight ? 
+                monster.x + MONSTER.WIDTH + MONSTER.PUNCH_RANGE : 
+                monster.x;
+                
+            return !window.damaged &&
+                   window.x >= punchStartX && 
+                   window.x <= punchEndX &&
+                   window.y >= monster.y &&
+                   window.y <= monster.y + MONSTER.HEIGHT;
+        }
+
+        function isPunchingTank(monster, tank) {
+            const punchStartX = monster.facingRight ? 
+                monster.x + MONSTER.WIDTH : 
+                monster.x - MONSTER.PUNCH_RANGE;
+                
+            const punchEndX = monster.facingRight ? 
+                monster.x + MONSTER.WIDTH + MONSTER.PUNCH_RANGE : 
+                monster.x;
+                
+            return tank.x < punchEndX && 
+                   tank.x + TANK.WIDTH > punchStartX &&
+                   monster.y + MONSTER.HEIGHT > tank.y && 
+                   monster.y < tank.y + TANK.HEIGHT + 20;
+        }
+        // ============= RENDERING SYSTEMS =============
+        
+        function render() {
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw background
+            ctx.fillStyle = 'skyblue';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw ground
+            ctx.fillStyle = '#654321';
+            ctx.fillRect(0, canvas.height - 100, canvas.width, 100);
+            
+            // Draw buildings
+            gameState.buildings.forEach(renderBuilding);
+            
+            // Draw tanks
+            gameState.tanks.forEach(renderTank);
+            
+            // Draw projectiles
+            renderProjectiles();
+            
+            // Draw monster
+            renderMonster(gameState.monster);
+            
+            // Draw UI
+            renderUI();
+        }
+
+        function renderBuilding(building) {
+            if (building.destroyed) {
+                renderDestroyedBuilding(building);
+                return;
+            }
+
+            // Building structure
+            ctx.fillStyle = '#808080';
+            ctx.fillRect(building.x, building.y, building.width, building.height);
+            
+            // Draw top edge in red to debug
+            ctx.fillStyle = 'red';
+            ctx.fillRect(building.x, building.y, building.width, 2);
+            
+            // Windows
+            building.windows.forEach(window => {
+                ctx.fillStyle = window.damaged ? '#000000' : '#87CEEB';
+                ctx.fillRect(window.x, window.y, BUILDING.WINDOW_SIZE, BUILDING.WINDOW_SIZE);
+                
+                if (window.guard && !window.damaged) {
+                    ctx.fillStyle = 'red';
+                    ctx.fillRect(
+                        window.x + BUILDING.WINDOW_SIZE/4,
+                        window.y + BUILDING.WINDOW_SIZE/4,
+                        GUARD.WIDTH/2,
+                        GUARD.HEIGHT/2
+                    );
+                }
+            });
+        }
+
+        function renderDestroyedBuilding(building) {
+            ctx.fillStyle = '#4A4A4A';
+            ctx.fillRect(
+                building.x,
+                canvas.height - 100,
+                building.width,
+                100
+            );
+        }
+
+        function renderTank(tank) {
+            if (tank.destroyed) return;
+            
+            // Tank body
+            ctx.fillStyle = '#006400';
+            ctx.fillRect(tank.x, tank.y, TANK.WIDTH, TANK.HEIGHT);
+            
+            // Tank cannon
+            ctx.fillStyle = '#004B00';
+            ctx.fillRect(
+                tank.x + TANK.WIDTH/2 - 5,
+                tank.y - 10,
+                10,
+                20
+            );
+        }
+
+        function renderProjectiles() {
+            if (!gameState.projectiles) return;
+            
+            gameState.projectiles.forEach(proj => {
+                // Glow effect
+                ctx.fillStyle = proj.fromGuard ? 
+                    'rgba(255,0,0,0.3)' : 
+                    'rgba(255,255,0,0.3)';
+                ctx.beginPath();
+                ctx.arc(proj.x, proj.y, 8, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Core projectile
+                ctx.fillStyle = proj.fromGuard ? 'red' : 'yellow';
+                ctx.beginPath();
+                ctx.arc(proj.x, proj.y, 5, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        function renderMonster(monster) {
+            const punchFrame = monster.isPunching ? 
+                MONSTER.ANIMATIONS.PUNCH.frames[monster.punchFrame] : 
+                MONSTER.ANIMATIONS.PUNCH.frames[0];
+
+            // Body
+            ctx.fillStyle = '#8B4513';
+            ctx.fillRect(monster.x, monster.y, MONSTER.WIDTH, MONSTER.HEIGHT);
+
+            // Head
+            ctx.fillRect(
+                monster.x + MONSTER.WIDTH/4,
+                monster.y - MONSTER.HEIGHT/4,
+                MONSTER.WIDTH/2,
+                MONSTER.HEIGHT/4
+            );
+
+            // Eyes
+            ctx.fillStyle = 'white';
+            const eyeX = monster.facingRight ? 
+                monster.x + MONSTER.WIDTH * 0.6 : 
+                monster.x + MONSTER.WIDTH * 0.2;
+            ctx.fillRect(eyeX, monster.y - MONSTER.HEIGHT/5, 8, 8);
+
+            // Arms
+            renderMonsterArms(monster, punchFrame);
+        }
+
+        function renderMonsterArms(monster, punchFrame) {
+            // Punching arm
+            ctx.save();
+            ctx.translate(
+                monster.facingRight ? 
+                    monster.x + MONSTER.WIDTH * 0.8 : 
+                    monster.x + MONSTER.WIDTH * 0.2,
+                monster.y + MONSTER.HEIGHT * 0.3
+            );
+            
+            if (!monster.facingRight) {
+                ctx.scale(-1, 1);
+            }
+
+            renderPunchingArm(monster, punchFrame);
+            ctx.restore();
+
+            // Non-punching arm
+            renderNonPunchingArm(monster);
+        }
+
+        function renderPunchingArm(monster, punchFrame) {
+            ctx.rotate(punchFrame.armAngle);
+            ctx.fillStyle = '#8B4513';
+            
+            // Arm
+            ctx.fillRect(
+                0,
+                -5,
+                MONSTER.WIDTH * 0.4 + punchFrame.armOffset,
+                10
+            );
+
+            // Fist
+            ctx.beginPath();
+            ctx.arc(
+                MONSTER.WIDTH * 0.4 + punchFrame.armOffset,
+                0,
+                8,
+                0,
+                Math.PI * 2
+            );
+            ctx.fill();
+
+            // Punch effect
+            if (monster.isPunching && monster.punchFrame === 2) {
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+                ctx.beginPath();
+                ctx.arc(
+                    MONSTER.WIDTH * 0.4 + punchFrame.armOffset,
+                    0,
+                    12,
+                    0,
+                    Math.PI * 2
+                );
+                ctx.fill();
+            }
+        }
+        function renderNonPunchingArm(monster) {
+            ctx.save();
+            ctx.translate(
+                monster.facingRight ? 
+                    monster.x + MONSTER.WIDTH * 0.2 : 
+                    monster.x + MONSTER.WIDTH * 0.8,
+                monster.y + MONSTER.HEIGHT * 0.3
+            );
+            
+            if (!monster.facingRight) {
+                ctx.scale(-1, 1);
+            }
+
+            ctx.rotate(monster.isClimbing ? -0.5 : 0.2);
+            ctx.fillStyle = '#8B4513';
+            ctx.fillRect(0, -5, MONSTER.WIDTH * 0.3, 10);
+            
+            // Hand
+            ctx.beginPath();
+            ctx.arc(MONSTER.WIDTH * 0.3, 0, 6, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
+
+        function renderUI() {
+            // Health bar
+            ctx.fillStyle = 'black';
+            ctx.fillRect(10, 10, 204, 24);
+            ctx.fillStyle = 'red';
+            ctx.fillRect(12, 12, 200 * (gameState.monster.health / 100), 20);
+            
+            // Score
+            ctx.fillStyle = 'black';
+            ctx.font = '20px Arial';
+            ctx.fillText(`Score: ${gameState.monster.score}`, canvas.width - 150, 30);
+        }
+
+        // ============= BUILDING SYSTEM =============
+        
+        function createBuilding(x, type) {
+            // Add one more floor height to account for the roof
+            const height = (type.floors * BUILDING.WINDOW_SIZE * 3) + BUILDING.WINDOW_SIZE;
+            const building = {
+                x: x,
+                y: canvas.height - 100 - height,
+                width: type.width,
+                height: height,
+                health: 100,
+                destroyed: false,
+                windows: [],
+                guards: []
+            };
+
+            // Create windows and guards
+            for (let floor = 0; floor < type.floors; floor++) {
+                for (let window = 0; window < 3; window++) {
+                    const windowObj = {
+                        x: x + window * BUILDING.WINDOW_SIZE * 2,
+                        y: building.y + floor * BUILDING.WINDOW_SIZE * 3,
+                        damaged: false
+                    };
+
+                    // Random chance to add guard
+                    if (Math.random() < GUARD.APPEAR_CHANCE) {
+                        const guard = {
+                            x: windowObj.x,
+                            y: windowObj.y,
+                            window: windowObj,
+                            lastShootTime: 0
+                        };
+                        building.guards.push(guard);
+                        windowObj.guard = guard;
+                    }
+
+                    building.windows.push(windowObj);
+                }
+            }
+
+            return building;
+        }
+
+        function damageWindow(window) {
+            window.damaged = true;
+            if (window.guard) {
+                window.guard.active = false;
+            }
+        }
+
+        function checkBuildingHealth(building) {
+            const damagedWindows = building.windows.filter(w => w.damaged).length;
+            const healthPercentage = 100 - (damagedWindows / building.windows.length * 100);
+            building.health = healthPercentage;
+
+            if (healthPercentage < BUILDING.COLLAPSE_THRESHOLD) {
+                building.destroyed = true;
+            }
+        }
+
+        // ============= GAME LOOP =============
+        
+        function update() {
+            const monster = gameState.monster;
+
+            // Core systems
+            checkClimbing(monster);
+            handleMovement(monster);
+            updatePhysics(monster);
+            handleCombat(monster);
+
+            // Enemy systems
+            updateGuards(monster);
+            updateTanks();
+            updateProjectiles(monster);
+
+            // Game state checks
+            if (monster.health <= 0) {
+                gameState.monstersAlive = false;
+            }
+        }
+
+        function gameLoop(timestamp) {
+            // Calculate delta time
+            if (!gameState.lastTime) gameState.lastTime = timestamp;
+            const deltaTime = timestamp - gameState.lastTime;
+            gameState.lastTime = timestamp;
+
+            // Update game state
+            update(deltaTime);
+            
+            // Render
+            render();
+
+            // Continue loop if game is still running
+            if (gameState.monstersAlive) {
+                requestAnimationFrame(gameLoop);
+            } else {
+                endGame();
+            }
+        }
+
+        // ============= GAME INITIALIZATION =============
+        
+        function initializeGame() {
+            // Reset game state
+            gameState.monster = {
+                x: 100,
+                y: 500,
+                vx: 0,
+                vy: 0,
+                isClimbing: false,
+                facingRight: true,
+                currentBuilding: null,
+                lastPunchTime: 0,
+                health: 100,
+                score: 0,
+                punchFrame: 0,
+                punchAnimationTimer: 0,
+                isPunching: false
+            };
+
+            // Create buildings
+            gameState.buildings = [];
+            for (let i = 0; i < 3; i++) {
+                gameState.buildings.push(
+                    createBuilding(
+                        100 + i * (BUILDING.WIDTH + 100),
+                        BUILDING.TYPES.MEDIUM
+                    )
+                );
+            }
+
+            // Create tanks
+            gameState.tanks = [{
+                x: canvas.width - 200,
+                y: canvas.height - TANK.HEIGHT - 100,
+                direction: -1,
+                destroyed: false,
+                lastShootTime: 0
+            }];
+
+            // Start game loop
+            gameState.monstersAlive = true;
+            requestAnimationFrame(gameLoop);
+        }
+
+        function endGame() {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.fillStyle = 'white';
+            ctx.font = '48px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('GAME OVER', canvas.width/2, canvas.height/2);
+            ctx.font = '24px Arial';
+            ctx.fillText(`Final Score: ${gameState.monster.score}`, canvas.width/2, canvas.height/2 + 50);
+        }
+
+        // Start the game
+        initializeGame();
+    </script>
+</body>
+</html>
