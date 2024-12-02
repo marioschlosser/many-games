@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Minesweeper</title>
+    <style>
+        canvas {
+            border: 1px solid #000;
+        }
+        #controls {
+            margin-bottom: 10px;
+        }
+        #gameOverScreen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            color: white;
+            font-family: Arial, sans-serif;
+            opacity: 0;
+            transition: opacity 1s;
+        }
+        
+        #gameOverScreen.visible {
+            opacity: 1;
+        }
+        
+        #gameOverScreen h1 {
+            font-size: 72px;
+            margin: 0;
+            text-shadow: 0 0 20px #ff4444;
+            animation: pulse 2s infinite;
+        }
+        
+        #gameOverScreen button {
+            margin-top: 20px;
+            padding: 10px 20px;
+            font-size: 24px;
+            background: #ff4444;
+            border: none;
+            color: white;
+            cursor: pointer;
+            border-radius: 5px;
+            transition: transform 0.2s, background 0.2s;
+        }
+        
+        #gameOverScreen button:hover {
+            transform: scale(1.1);
+            background: #ff6666;
+        }
+        
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+            100% { transform: scale(1); }
+        }
+        
+        #winScreen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            display: none;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            color: white;
+            font-family: Arial, sans-serif;
+            opacity: 0;
+            transition: opacity 1s;
+        }
+        
+        #winScreen.visible {
+            opacity: 1;
+        }
+        
+        #winScreen h1 {
+            font-size: 72px;
+            margin: 0;
+            text-shadow: 0 0 20px #44ff44;
+            animation: rainbow 3s infinite;
+        }
+        
+        #winScreen button {
+            margin-top: 20px;
+            padding: 10px 20px;
+            font-size: 24px;
+            background: #44ff44;
+            border: none;
+            color: white;
+            cursor: pointer;
+            border-radius: 5px;
+            transition: transform 0.2s, background 0.2s;
+        }
+        
+        #winScreen button:hover {
+            transform: scale(1.1);
+            background: #66ff66;
+        }
+        
+        @keyframes rainbow {
+            0% { color: #ff4444; }
+            33% { color: #44ff44; }
+            66% { color: #4444ff; }
+            100% { color: #ff4444; }
+        }
+        
+        .victory-particles {
+            position: absolute;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <button onclick="newGame('beginner')">Beginner</button>
+        <button onclick="newGame('intermediate')">Intermediate</button>
+        <button onclick="newGame('expert')">Expert</button>
+        <span id="mineCount"></span>
+        <span id="timer"></span>
+    </div>
+    <canvas id="gameCanvas"></canvas>
+    <div id="gameOverScreen">
+        <h1>GAME OVER</h1>
+        <button onclick="newGame(currentDifficulty)">Play Again</button>
+    </div>
+    <div id="winScreen">
+        <h1>YOU WON!</h1>
+        <button onclick="newGame(currentDifficulty)">Play Again</button>
+    </div>
+
+    <script>
+        const CELL_SIZE = 30;
+        const DIFFICULTY = {
+            beginner: { width: 9, height: 9, mines: 10 },
+            intermediate: { width: 16, height: 16, mines: 40 },
+            expert: { width: 30, height: 16, mines: 99 }
+        };
+
+        class Cell {
+            constructor() {
+                this.isMine = false;
+                this.isRevealed = false;
+                this.isFlagged = false;
+                this.adjacentMines = 0;
+            }
+        }
+
+        class Game {
+            constructor(difficulty) {
+                this.difficulty = DIFFICULTY[difficulty];
+                this.grid = [];
+                this.gameOver = false;
+                this.firstClick = true;
+                
+                this.canvas = document.getElementById('gameCanvas');
+                this.ctx = this.canvas.getContext('2d');
+                
+                this.initializeCanvas();
+                this.initializeGrid();
+                this.addEventListeners();
+                
+                // Add new properties for animations
+                this.animations = [];
+                this.colors = {
+                    revealed: '#e0e0e0',
+                    unrevealed: '#a0a0a0',
+                    hover: '#b8b8b8',
+                    grid: '#808080',
+                    numbers: ['#000', '#2664d6', '#28a745', '#dc3545', '#6f42c1', '#fd7e14', '#17a2b8', '#343a40', '#868e96'],
+                    flag: '#dc3545',
+                    mine: '#212529',
+                    explosion: '#ff4444'
+                };
+                
+                this.hoverCell = { x: -1, y: -1 };
+                this.lastFrame = 0;
+                this.animate();
+                
+                // Add hover listener
+                this.canvas.addEventListener('mousemove', (e) => {
+                    const rect = this.canvas.getBoundingClientRect();
+                    this.hoverCell = {
+                        x: Math.floor((e.clientX - rect.left) / CELL_SIZE),
+                        y: Math.floor((e.clientY - rect.top) / CELL_SIZE)
+                    };
+                });
+                
+                this.canvas.addEventListener('mouseout', () => {
+                    this.hoverCell = { x: -1, y: -1 };
+                });
+                this.gameOverScreenShown = false;
+                this.winScreenShown = false;
+                currentDifficulty = difficulty;
+            }
+
+            initializeCanvas() {
+                this.canvas.width = this.difficulty.width * CELL_SIZE;
+                this.canvas.height = this.difficulty.height * CELL_SIZE;
+            }
+
+            initializeGrid() {
+                for (let y = 0; y < this.difficulty.height; y++) {
+                    this.grid[y] = [];
+                    for (let x = 0; x < this.difficulty.width; x++) {
+                        this.grid[y][x] = new Cell();
+                    }
+                }
+            }
+
+            addEventListeners() {
+                this.canvas.addEventListener('click', (e) => this.handleClick(e));
+                this.canvas.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                    this.handleRightClick(e);
+                });
+            }
+
+            handleClick(e) {
+                const rect = this.canvas.getBoundingClientRect();
+                const x = Math.floor((e.clientX - rect.left) / CELL_SIZE);
+                const y = Math.floor((e.clientY - rect.top) / CELL_SIZE);
+
+                if (this.firstClick) {
+                    this.placeMines(x, y);
+                    this.firstClick = false;
+                }
+
+                this.revealCell(x, y);
+                this.draw();
+            }
+
+            handleRightClick(e) {
+                const rect = this.canvas.getBoundingClientRect();
+                const x = Math.floor((e.clientX - rect.left) / CELL_SIZE);
+                const y = Math.floor((e.clientY - rect.top) / CELL_SIZE);
+
+                const cell = this.grid[y][x];
+                if (!cell.isRevealed) {
+                    cell.isFlagged = !cell.isFlagged;
+                }
+                
+                if (this.checkWinCondition()) {
+                    this.showWinScreen();
+                }
+                
+                this.draw();
+            }
+
+            placeMines(firstX, firstY) {
+                // First, reset any existing mines
+                for (let y = 0; y < this.difficulty.height; y++) {
+                    for (let x = 0; x < this.difficulty.width; x++) {
+                        this.grid[y][x].isMine = false;
+                        this.grid[y][x].adjacentMines = 0;
+                    }
+                }
+
+                let minesToPlace = this.difficulty.mines;
+                while (minesToPlace > 0) {
+                    const x = Math.floor(Math.random() * this.difficulty.width);
+                    const y = Math.floor(Math.random() * this.difficulty.height);
+                    
+                    // Don't place mine on first click or where there's already a mine
+                    if ((Math.abs(x - firstX) > 1 || Math.abs(y - firstY) > 1) && !this.grid[y][x].isMine) {
+                        this.grid[y][x].isMine = true;
+                        minesToPlace--;
+                    }
+                }
+                this.calculateNumbers();
+            }
+
+            calculateNumbers() {
+                for (let y = 0; y < this.difficulty.height; y++) {
+                    for (let x = 0; x < this.difficulty.width; x++) {
+                        if (!this.grid[y][x].isMine) {
+                            this.grid[y][x].adjacentMines = this.countAdjacentMines(x, y);
+                        }
+                    }
+                }
+            }
+
+            countAdjacentMines(x, y) {
+                let count = 0;
+                for (let dy = -1; dy <= 1; dy++) {
+                    for (let dx = -1; dx <= 1; dx++) {
+                        const newX = x + dx;
+                        const newY = y + dy;
+                        if (newX >= 0 && newX < this.difficulty.width &&
+                            newY >= 0 && newY < this.difficulty.height) {
+                            if (this.grid[newY][newX].isMine) count++;
+                        }
+                    }
+                }
+                return count;
+            }
+
+            revealCell(x, y) {
+                if (x < 0 || x >= this.difficulty.width || y < 0 || y >= this.difficulty.height) return;
+                
+                const cell = this.grid[y][x];
+                if (cell.isRevealed || cell.isFlagged) return;
+                
+                this.animations.push(new RevealAnimation(x, y));
+                cell.isRevealed = true;
+                
+                if (cell.isMine) {
+                    this.gameOver = true;
+                    // Add massive explosion animation
+                    this.animations.push(new ExplosionAnimation(x, y));
+                    
+                    // Reveal all mines with cascade effect
+                    let delay = 0;
+                    for (let my = 0; my < this.difficulty.height; my++) {
+                        for (let mx = 0; mx < this.difficulty.width; mx++) {
+                            if (this.grid[my][mx].isMine && !this.grid[my][mx].isRevealed) {
+                                delay += 0.05;
+                                setTimeout(() => {
+                                    this.grid[my][mx].isRevealed = true;
+                                    this.animations.push(new RevealAnimation(mx, my));
+                                    // Add smaller explosions for other mines
+                                    if (Math.random() < 0.3) { // Only 30% of mines explode
+                                        setTimeout(() => {
+                                            this.animations.push(new ExplosionAnimation(mx, my));
+                                        }, Math.random() * 500);
+                                    }
+                                }, delay * 1000);
+                            }
+                        }
+                    }
+                    
+                    // Show game over screen after a delay
+                    setTimeout(() => this.showGameOver(), 1500);
+                    return;
+                }
+                
+                if (cell.adjacentMines === 0) {
+                    for (let dy = -1; dy <= 1; dy++) {
+                        for (let dx = -1; dx <= 1; dx++) {
+                            setTimeout(() => {
+                                this.revealCell(x + dx, y + dy);
+                                if (this.checkWinCondition()) {
+                                    this.showWinScreen();
+                                }
+                            }, 50);
+                        }
+                    }
+                } else {
+                    if (this.checkWinCondition()) {
+                        this.showWinScreen();
+                    }
+                }
+            }
+
+            draw() {
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+                
+                // Draw cells
+                for (let y = 0; y < this.difficulty.height; y++) {
+                    for (let x = 0; x < this.difficulty.width; x++) {
+                        const cell = this.grid[y][x];
+                        const isHovered = this.hoverCell.x === x && this.hoverCell.y === y;
+                        
+                        // Find any active animations for this cell
+                        const cellAnimations = this.animations.filter(anim => 
+                            anim.x === x && anim.y === y);
+                        
+                        // Base cell drawing
+                        this.ctx.fillStyle = cell.isRevealed ? 
+                            this.colors.revealed : 
+                            (isHovered ? this.colors.hover : this.colors.unrevealed);
+                        
+                        // Apply animation effects - only for RevealAnimation
+                        cellAnimations.forEach(anim => {
+                            if (anim instanceof RevealAnimation && anim.getColor) {
+                                this.ctx.fillStyle = anim.getColor(this.ctx.fillStyle);
+                            }
+                        });
+                        
+                        // Draw cell with subtle shadow
+                        this.ctx.beginPath();
+                        this.ctx.roundRect(
+                            x * CELL_SIZE + 1, 
+                            y * CELL_SIZE + 1, 
+                            CELL_SIZE - 2, 
+                            CELL_SIZE - 2,
+                            3
+                        );
+                        this.ctx.fill();
+                        
+                        if (!cell.isRevealed) {
+                            // Add 3D effect for unrevealed cells
+                            this.ctx.fillStyle = isHovered ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.2)';
+                            this.ctx.beginPath();
+                            this.ctx.moveTo(x * CELL_SIZE + 2, y * CELL_SIZE + 2);
+                            this.ctx.lineTo(x * CELL_SIZE + CELL_SIZE - 2, y * CELL_SIZE + 2);
+                            this.ctx.lineTo(x * CELL_SIZE + 2, y * CELL_SIZE + CELL_SIZE - 2);
+                            this.ctx.fill();
+                        }
+
+                        if (cell.isRevealed) {
+                            if (cell.isMine) {
+                                // Draw mine with gradient
+                                const gradient = this.ctx.createRadialGradient(
+                                    x * CELL_SIZE + CELL_SIZE/2, 
+                                    y * CELL_SIZE + CELL_SIZE/2, 
+                                    2,
+                                    x * CELL_SIZE + CELL_SIZE/2, 
+                                    y * CELL_SIZE + CELL_SIZE/2, 
+                                    CELL_SIZE/3
+                                );
+                                gradient.addColorStop(0, '#666');
+                                gradient.addColorStop(1, this.colors.mine);
+                                
+                                this.ctx.fillStyle = gradient;
+                                this.ctx.beginPath();
+                                this.ctx.arc(
+                                    x * CELL_SIZE + CELL_SIZE/2,
+                                    y * CELL_SIZE + CELL_SIZE/2,
+                                    CELL_SIZE/4,
+                                    0,
+                                    Math.PI * 2
+                                );
+                                this.ctx.fill();
+                            } else if (cell.adjacentMines > 0) {
+                                // Draw number with shadow
+                                this.ctx.fillStyle = this.colors.numbers[cell.adjacentMines];
+                                this.ctx.font = 'bold 20px Arial';
+                                this.ctx.textAlign = 'center';
+                                this.ctx.textBaseline = 'middle';
+                                this.ctx.shadowColor = 'rgba(0,0,0,0.2)';
+                                this.ctx.shadowBlur = 2;
+                                this.ctx.fillText(
+                                    cell.adjacentMines,
+                                    x * CELL_SIZE + CELL_SIZE/2,
+                                    y * CELL_SIZE + CELL_SIZE/2
+                                );
+                                this.ctx.shadowBlur = 0;
+                            }
+                        } else if (cell.isFlagged) {
+                            // Draw flag with animation
+                            const flagWave = Math.sin(performance.now() / 300) * 2;
+                            this.ctx.fillStyle = this.colors.flag;
+                            this.ctx.beginPath();
+                            this.ctx.moveTo(x * CELL_SIZE + CELL_SIZE/3, y * CELL_SIZE + CELL_SIZE/4);
+                            this.ctx.quadraticCurveTo(
+                                x * CELL_SIZE + CELL_SIZE * 0.8 + flagWave,
+                                y * CELL_SIZE + CELL_SIZE * 0.4,
+                                x * CELL_SIZE + CELL_SIZE/3,
+                                y * CELL_SIZE + CELL_SIZE * 0.6
+                            );
+                            this.ctx.fill();
+                        }
+                        
+                        // Apply any additional animation effects
+                        cellAnimations.forEach(anim => anim.draw(this.ctx, x, y, CELL_SIZE));
+                    }
+                }
+            }
+
+            animate() {
+                const now = performance.now();
+                const delta = (now - this.lastFrame) / 1000;
+                this.lastFrame = now;
+
+                // Update animations
+                this.animations = this.animations.filter(anim => {
+                    anim.update(delta);
+                    return !anim.finished;
+                });
+
+                this.draw();
+                requestAnimationFrame(() => this.animate());
+            }
+
+            showGameOver() {
+                if (this.gameOverScreenShown) return;
+                
+                const gameOverScreen = document.getElementById('gameOverScreen');
+                gameOverScreen.style.display = 'flex';
+                // Force reflow
+                gameOverScreen.offsetHeight;
+                gameOverScreen.classList.add('visible');
+                this.gameOverScreenShown = true;
+            }
+
+            showWinScreen() {
+                if (this.winScreenShown) return;
+                
+                const winScreen = document.getElementById('winScreen');
+                winScreen.style.display = 'flex';
+                // Force reflow
+                winScreen.offsetHeight;
+                winScreen.classList.add('visible');
+                this.winScreenShown = true;
+                
+                // Create victory particles
+                this.createVictoryParticles();
+            }
+
+            createVictoryParticles() {
+                for (let i = 0; i < 50; i++) {
+                    setTimeout(() => {
+                        const particle = document.createElement('div');
+                        particle.className = 'victory-particles';
+                        particle.style.left = Math.random() * window.innerWidth + 'px';
+                        particle.style.top = '-20px';
+                        particle.style.width = '10px';
+                        particle.style.height = '10px';
+                        particle.style.background = `hsl(${Math.random() * 360}, 100%, 50%)`;
+                        particle.style.borderRadius = '50%';
+                        document.body.appendChild(particle);
+
+                        let speed = 2 + Math.random() * 2;
+                        let angle = Math.random() * Math.PI / 2 + Math.PI / 4;
+                        let opacity = 1;
+
+                        function animate() {
+                            const left = parseFloat(particle.style.left);
+                            const top = parseFloat(particle.style.top);
+                            
+                            particle.style.left = (left + Math.cos(angle) * speed) + 'px';
+                            particle.style.top = (top + Math.sin(angle) * speed) + 'px';
+                            speed *= 0.99;
+                            opacity *= 0.99;
+                            particle.style.opacity = opacity;
+
+                            if (opacity > 0.01) {
+                                requestAnimationFrame(animate);
+                            } else {
+                                particle.remove();
+                            }
+                        }
+
+                        animate();
+                    }, Math.random() * 2000);
+                }
+            }
+
+            checkWinCondition() {
+                if (this.gameOver) return false;
+
+                let allMinesFlagged = true;
+                let noWrongFlags = true;
+                let allNonMinesRevealed = true;
+
+                for (let y = 0; y < this.difficulty.height; y++) {
+                    for (let x = 0; x < this.difficulty.width; x++) {
+                        const cell = this.grid[y][x];
+                        if (cell.isMine) {
+                            if (!cell.isFlagged) allMinesFlagged = false;
+                        } else {
+                            if (cell.isFlagged) noWrongFlags = false;
+                            if (!cell.isRevealed) allNonMinesRevealed = false;
+                        }
+                    }
+                }
+
+                return (allMinesFlagged && noWrongFlags) || (allNonMinesRevealed && noWrongFlags);
+            }
+        }
+
+        // Animation classes
+        class RevealAnimation {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.duration = 0.3;
+                this.elapsed = 0;
+                this.finished = false;
+            }
+            
+            update(delta) {
+                this.elapsed += delta;
+                if (this.elapsed >= this.duration) {
+                    this.finished = true;
+                }
+            }
+            
+            getColor(baseColor) {
+                const progress = Math.min(this.elapsed / this.duration, 1);
+                return `rgba(255,255,255,${1 - progress})`;
+            }
+            
+            draw(ctx, x, y, size) {
+                const progress = this.elapsed / this.duration;
+                ctx.fillStyle = `rgba(255,255,255,${0.5 * (1 - progress)})`;
+                ctx.beginPath();
+                ctx.arc(
+                    x * size + size/2,
+                    y * size + size/2,
+                    size * progress,
+                    0,
+                    Math.PI * 2
+                );
+                ctx.fill();
+            }
+        }
+
+        class ExplosionAnimation {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.duration = 1.5;
+                this.elapsed = 0;
+                this.finished = false;
+                
+                // Create multiple particle systems
+                this.particles = {
+                    debris: Array(30).fill().map(() => ({
+                        angle: Math.random() * Math.PI * 2,
+                        speed: 2 + Math.random() * 5,
+                        size: 2 + Math.random() * 4,
+                        color: `hsl(${Math.random() * 30 + 10}, 100%, 50%)`
+                    })),
+                    shockwave: Array(2).fill().map((_, i) => ({
+                        delay: i * 0.1,
+                        thickness: 3 + Math.random() * 2
+                    })),
+                    smoke: Array(15).fill().map(() => ({
+                        angle: Math.random() * Math.PI * 2,
+                        speed: 0.5 + Math.random() * 2,
+                        size: 10 + Math.random() * 20,
+                        spin: (Math.random() - 0.5) * 2
+                    }))
+                };
+            }
+            
+            update(delta) {
+                this.elapsed += delta;
+                if (this.elapsed >= this.duration) {
+                    this.finished = true;
+                }
+            }
+            
+            draw(ctx, x, y, size) {
+                const centerX = x * size + size/2;
+                const centerY = y * size + size/2;
+                const progress = this.elapsed / this.duration;
+                
+                // Draw shockwave
+                this.particles.shockwave.forEach(wave => {
+                    const waveProgress = Math.max(0, Math.min(1, (this.elapsed - wave.delay) / 0.5));
+                    if (waveProgress > 0) {
+                        const radius = size * 5 * waveProgress;
+                        ctx.strokeStyle = `rgba(255,255,255,${0.8 * (1 - waveProgress)})`;
+                        ctx.lineWidth = wave.thickness * (1 - waveProgress) * size;
+                        ctx.beginPath();
+                        ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+                        ctx.stroke();
+                    }
+                });
+                
+                // Draw smoke
+                this.particles.smoke.forEach(particle => {
+                    const smokeProgress = Math.min(1, this.elapsed * 1.5);
+                    const distance = particle.speed * size * smokeProgress;
+                    const px = centerX + Math.cos(particle.angle) * distance;
+                    const py = centerY + Math.sin(particle.angle) * distance;
+                    
+                    ctx.save();
+                    ctx.translate(px, py);
+                    ctx.rotate(particle.spin * this.elapsed);
+                    
+                    const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, particle.size);
+                    gradient.addColorStop(0, `rgba(50,50,50,${0.6 * (1 - smokeProgress)})`);
+                    gradient.addColorStop(1, `rgba(50,50,50,0)`);
+                    
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(-particle.size/2, -particle.size/2, particle.size, particle.size);
+                    ctx.restore();
+                });
+                
+                // Draw debris particles
+                this.particles.debris.forEach(particle => {
+                    const particleProgress = Math.min(1, this.elapsed * 2);
+                    const distance = particle.speed * size * particleProgress;
+                    const px = centerX + Math.cos(particle.angle) * distance;
+                    const py = centerY + Math.sin(particle.angle) * distance + (this.elapsed * this.elapsed * 100); // Add gravity
+                    
+                    ctx.fillStyle = `${particle.color}`;
+                    ctx.globalAlpha = 1 - particleProgress;
+                    ctx.beginPath();
+                    ctx.arc(px, py, particle.size * (1 - particleProgress), 0, Math.PI * 2);
+                    ctx.fill();
+                });
+                
+                ctx.globalAlpha = 1;
+                
+                // Draw flash
+                if (this.elapsed < 0.2) {
+                    const flashOpacity = 1 - (this.elapsed / 0.2);
+                    ctx.fillStyle = `rgba(255,255,255,${flashOpacity})`;
+                    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+                }
+            }
+        }
+
+        let game;
+        let currentDifficulty = 'beginner';
+        function newGame(difficulty) {
+            const gameOverScreen = document.getElementById('gameOverScreen');
+            const winScreen = document.getElementById('winScreen');
+            gameOverScreen.style.display = 'none';
+            winScreen.style.display = 'none';
+            gameOverScreen.classList.remove('visible');
+            winScreen.classList.remove('visible');
+            
+            // Remove any remaining victory particles
+            document.querySelectorAll('.victory-particles').forEach(p => p.remove());
+            
+            game = new Game(difficulty);
+            game.draw();
+        }
+
+        // Start with beginner difficulty
+        newGame('beginner');
+    </script>
+</body>
+</html>
