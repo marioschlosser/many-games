@@ -1,0 +1,1186 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sim City Game Logic - Enhanced Implementation</title>
+    <style>
+        /* Styles for the city grid */
+        #city-grid {
+            display: grid;
+            grid-template-columns: repeat(50, 10px);
+            grid-template-rows: repeat(50, 10px);
+            gap: 1px;
+        }
+
+        .tile {
+            width: 10px;
+            height: 10px;
+        }
+
+        /* Tile colors based on type */
+        .DIRT { background-color: #a0522d; }
+        .GRASS { background-color: #228b22; }
+        .FOREST { background-color: #006400; }
+        .WATER { background-color: #1e90ff; }
+        .ROAD { background-color: #808080; }
+        .HIGH_TRAFFIC_ROAD { background-color: #696969; }
+        .POWER_LINE { background-color: #ffff00; }
+        .RESIDENTIAL_ZONE { background-color: #7fffd4; }
+        .COMMERCIAL_ZONE { background-color: #ffa500; }
+        .INDUSTRIAL_ZONE { background-color: #a9a9a9; }
+        .POWER_PLANT { background-color: #ff0000; }
+        .FIRE_STATION { background-color: #ff4500; }
+        .POLICE_STATION { background-color: #00008b; }
+        .FIRE { background-color: #ff6347; }
+        .RUBBLE { background-color: #696969; }
+        .RADIOACTIVE { background-color: #8b008b; }
+    </style>
+</head>
+<body>
+    <h1>Sim City Game Logic - Enhanced Implementation</h1>
+    <div id="city-grid"></div>
+
+    <script>
+        // -------- Tile Constants and Specifications --------
+        const TileType = {
+            // Terrain Tiles
+            DIRT: 'DIRT',
+            GRASS: 'GRASS',
+            FOREST: 'FOREST',
+            WATER: 'WATER',
+
+            // Infrastructure Tiles
+            ROAD: 'ROAD',
+            RAIL: 'RAIL',
+            POWER_LINE: 'POWER_LINE',
+
+            // Zone Tiles
+            RESIDENTIAL_ZONE: 'RESIDENTIAL_ZONE',
+            COMMERCIAL_ZONE: 'COMMERCIAL_ZONE',
+            INDUSTRIAL_ZONE: 'INDUSTRIAL_ZONE',
+
+            // Special Buildings
+            POWER_PLANT: 'POWER_PLANT',
+            FIRE_STATION: 'FIRE_STATION',
+            POLICE_STATION: 'POLICE_STATION',
+
+            // Disaster Tiles
+            FIRE: 'FIRE',
+            RUBBLE: 'RUBBLE',
+            RADIOACTIVE: 'RADIOACTIVE',
+
+            // Animated Tiles
+            HIGH_TRAFFIC_ROAD: 'HIGH_TRAFFIC_ROAD',
+
+            // Powered/Unpowered Zones
+            POWERED_ZONE: 'POWERED_ZONE',
+            UNPOWERED_ZONE: 'UNPOWERED_ZONE',
+        };
+
+        class TileSpec {
+            constructor(tileType, attributes = {}) {
+                this.tileType = tileType;
+                this.name = attributes.name || tileType;
+                this.canBulldoze = attributes.canBulldoze || false;
+                this.canBurn = attributes.canBurn || false;
+                this.canConduct = attributes.canConduct || false;
+                this.overWater = attributes.overWater || false;
+                this.isZone = attributes.isZone || false;
+                this.population = attributes.population || 0;
+                this.pollutionValue = attributes.pollutionValue || 0;
+                this.isCombustible = attributes.isCombustible || false;
+                this.description = attributes.description || '';
+                this.onPower = attributes.onPower || null;
+                this.onShutdown = attributes.onShutdown || null;
+                this.onFire = attributes.onFire || TileType.FIRE;
+                this.onExtinguish = attributes.onExtinguish || TileType.RUBBLE;
+                this.onTrafficIncrease = attributes.onTrafficIncrease || null;
+                this.onTrafficDecrease = attributes.onTrafficDecrease || null;
+            }
+        }
+
+        class Tool {
+            constructor() {
+                this.isActive = false;
+                this.startPoint = null;
+                this.endPoint = null;
+            }
+
+            activate() {
+                this.isActive = true;
+            }
+
+            deactivate() {
+                this.isActive = false;
+                this.startPoint = null;
+                this.endPoint = null;
+            }
+
+            setStartPoint(x, y) {
+                this.startPoint = { x, y };
+            }
+
+            setEndPoint(x, y) {
+                this.endPoint = { x, y };
+            }
+
+            // Abstract method to be implemented by subclasses
+            apply(startPoint, endPoint, cityMap, budgetManager) {
+                throw new Error('Tool.apply() must be implemented by subclass');
+            }
+        }
+        
+        class BulldozerTool extends Tool {
+            constructor() {
+                super();
+                this.costPerTile = 1; // Bulldozing cost per tile
+            }
+
+            fixTile(tile, x, y, cityMap) {
+                if (tile.isRoad()) {
+                    this.updateRoadTile(tile, x, y, cityMap);
+                } else if (tile.tileType === TileType.POWER_LINE) {
+                    this.updatePowerLineTile(tile, x, y, cityMap);
+                }
+                // Add other tile types as needed
+            }
+
+            updateRoadTile(tile, x, y, cityMap) {
+                // Determine connections to adjacent roads
+                const connections = {
+                    north: this.checkRoadConnection(x, y - 1, cityMap),
+                    east: this.checkRoadConnection(x + 1, y, cityMap),
+                    south: this.checkRoadConnection(x, y + 1, cityMap),
+                    west: this.checkRoadConnection(x - 1, y, cityMap),
+                };
+
+                // Update the tile's properties based on connections
+                tile.connections = connections;
+
+                // Additional logic to update the tile's appearance if necessary
+            }
+
+            checkRoadConnection(x, y, cityMap) {
+                if (cityMap.isInBounds(x, y)) {
+                    const adjacentTile = cityMap.getTile(x, y);
+                    return adjacentTile.isRoad();
+                }
+                return false;
+            }
+
+            updatePowerLineTile(tile, x, y, cityMap) {
+                // Determine connections to adjacent power lines or conductive tiles
+                const connections = {
+                    north: this.checkPowerConnection(x, y - 1, cityMap),
+                    east: this.checkPowerConnection(x + 1, y, cityMap),
+                    south: this.checkPowerConnection(x, y + 1, cityMap),
+                    west: this.checkPowerConnection(x - 1, y, cityMap),
+                };
+
+                tile.connections = connections;
+
+                // Additional logic to update the tile's appearance if necessary
+            }
+
+            checkPowerConnection(x, y, cityMap) {
+                if (cityMap.isInBounds(x, y)) {
+                    const adjacentTile = cityMap.getTile(x, y);
+                    return adjacentTile.canConductPower();
+                }
+                return false;
+            }
+
+            isZoneCenter(x, y, cityMap) {
+                const tile = cityMap.getTile(x, y);
+                return tile.spec.isZone && tile.spec.isZoneCenter;
+            }
+
+            bulldozeZone(x, y, cityMap, budgetManager) {
+                const zoneSize = this.getZoneSize(tile);
+                const xStart = x - Math.floor(zoneSize.width / 2);
+                const yStart = y - Math.floor(zoneSize.height / 2);
+
+                for (let yy = yStart; yy < yStart + zoneSize.height; yy++) {
+                    for (let xx = xStart; xx < xStart + zoneSize.width; xx++) {
+                        if (cityMap.isInBounds(xx, yy)) {
+                            const tile = cityMap.getTile(xx, yy);
+                            if (tile.spec.canBulldoze) {
+                                if (budgetManager.totalFunds >= this.costPerTile) {
+                                    this.bulldozeTile(xx, yy, cityMap);
+                                    budgetManager.adjustTotalFunds(-this.costPerTile);
+                                } else {
+                                    console.log('Insufficient funds to bulldoze zone.');
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            getZoneSize(tile) {
+                // Assume zone sizes are defined in the tile's spec
+                return {
+                    width: tile.spec.zoneWidth || 3,
+                    height: tile.spec.zoneHeight || 3,
+                };
+            }
+
+            fixAdjacentTiles(x, y, cityMap) {
+                const directions = [
+                    { dx: -1, dy: 0 }, // West
+                    { dx: 1, dy: 0 },  // East
+                    { dx: 0, dy: -1 }, // North
+                    { dx: 0, dy: 1 },  // South
+                ];
+
+                for (const dir of directions) {
+                    const nx = x + dir.dx;
+                    const ny = y + dir.dy;
+
+                    if (cityMap.isInBounds(nx, ny)) {
+                        const adjacentTile = cityMap.getTile(nx, ny);
+
+                        // If the adjacent tile is a dynamic tile (e.g., road, power line), fix its state
+                        if (adjacentTile.isRoad() || adjacentTile.tileType === TileType.POWER_LINE) {
+                            this.fixTile(adjacentTile, nx, ny, cityMap);
+                        }
+                    }
+                }
+            }
+            bulldozeTile(x, y, cityMap) {
+                const tile = cityMap.getTile(x, y);
+
+                // Remove the tile and replace it with DIRT
+                cityMap.setTile(x, y, new Tile(TileType.DIRT));
+
+                // Fix adjacent tiles
+                this.fixAdjacentTiles(x, y, cityMap);
+            }
+
+            apply(startPoint, endPoint, cityMap, budgetManager) {
+                const xMin = Math.min(startPoint.x, endPoint.x);
+                const xMax = Math.max(startPoint.x, endPoint.x);
+                const yMin = Math.min(startPoint.y, endPoint.y);
+                const yMax = Math.max(startPoint.y, endPoint.y);
+
+                let totalCost = 0;
+
+                for (let y = yMin; y <= yMax; y++) {
+                    for (let x = xMin; x <= xMax; x++) {
+                        if (cityMap.isInBounds(x, y)) {
+                            const tile = cityMap.getTile(x, y);
+                            const canBulldoze = tile.spec.canBulldoze;
+
+                            if (canBulldoze) {
+                                if (budgetManager.totalFunds >= this.costPerTile) {
+                                    // Perform the bulldozing
+                                    this.bulldozeTile(x, y, cityMap);
+                                    budgetManager.adjustTotalFunds(-this.costPerTile);
+                                    totalCost += this.costPerTile;
+                                } else {
+                                    console.log('Insufficient funds to bulldoze.');
+                                    return;
+                                }
+                            } else {
+                                console.log(`Cannot bulldoze ${tile.spec.name} at (${x}, ${y}).`);
+                            }
+                        }
+                    }
+                }
+
+                if (totalCost > 0) {
+                    console.log(`Bulldozed area. Total cost: ${totalCost}`);
+                }
+            }
+        }
+
+        class Tiles {
+            constructor() {
+                this.tileSpecs = {};
+                this.initTileSpecs();
+            }
+
+            initTileSpecs() {
+                // Initialize tile specifications as before
+                // Terrain Tiles
+                this.tileSpecs[TileType.DIRT] = new TileSpec(TileType.DIRT, {
+                    name: 'Dirt',
+                    canBulldoze: true,
+                    canBurn: false,
+                    canConduct: false,
+                    isCombustible: false,
+                    isIndestructible: false,
+                    description: 'Empty land ready for construction.',
+                });
+
+                this.tileSpecs[TileType.GRASS] = new TileSpec(TileType.GRASS, {
+                    name: 'Grass',
+                    canBulldoze: true,
+                    canBurn: false,
+                    canConduct: false,
+                    isCombustible: false,
+                    description: 'Grassland.',
+                });
+
+                this.tileSpecs[TileType.FOREST] = new TileSpec(TileType.FOREST, {
+                    name: 'Forest',
+                    canBulldoze: true,
+                    canBurn: true,
+                    canConduct: false,
+                    isCombustible: true,
+                    description: 'A dense forest.',
+                });
+
+                this.tileSpecs[TileType.WATER] = new TileSpec(TileType.WATER, {
+                    name: 'Water',
+                    canBulldoze: false,
+                    canBurn: false,
+                    canConduct: false,
+                    overWater: true,
+                    isIndestructible: true,
+                    description: 'Water body.',
+                });
+
+                // Infrastructure Tiles
+                this.tileSpecs[TileType.ROAD] = new TileSpec(TileType.ROAD, {
+                    name: 'Road',
+                    canBulldoze: true,
+                    canBurn: false,
+                    canConduct: true,
+                    isConductive: true,
+                    isCombustible: false,
+                    description: 'A road for vehicles.',
+                    onTrafficIncrease: TileType.HIGH_TRAFFIC_ROAD,
+                });
+
+                this.tileSpecs[TileType.HIGH_TRAFFIC_ROAD] = new TileSpec(TileType.HIGH_TRAFFIC_ROAD, {
+                    name: 'High Traffic Road',
+                    canBulldoze: true,
+                    canBurn: false,
+                    canConduct: true,
+                    isConductive: true,
+                    isCombustible: false,
+                    description: 'A road with heavy traffic.',
+                    onTrafficDecrease: TileType.ROAD,
+                });
+
+                this.tileSpecs[TileType.POWER_LINE] = new TileSpec(TileType.POWER_LINE, {
+                    name: 'Power Line',
+                    canBulldoze: true,
+                    canBurn: false,
+                    canConduct: true,
+                    isConductive: true,
+                    isCombustible: false,
+                    description: 'Conducts power.',
+                });
+
+                // Zone Tiles
+                this.tileSpecs[TileType.RESIDENTIAL_ZONE] = new TileSpec(TileType.RESIDENTIAL_ZONE, {
+                    name: 'Residential Zone',
+                    canBulldoze: true,
+                    canBurn: true,
+                    canConduct: true,
+                    isZone: true,
+                    isCombustible: true,
+                    population: 10,
+                    pollutionValue: 2,
+                    description: 'Housing for citizens.',
+                    onPower: TileType.POWERED_ZONE,
+                    onShutdown: TileType.UNPOWERED_ZONE,
+                });
+
+                this.tileSpecs[TileType.POWERED_ZONE] = new TileSpec(TileType.POWERED_ZONE, {
+                    name: 'Powered Residential Zone',
+                    canBulldoze: true,
+                    canBurn: true,
+                    canConduct: true,
+                    isZone: true,
+                    isCombustible: true,
+                    population: 15,
+                    pollutionValue: 2,
+                    description: 'Housing with power.',
+                    onShutdown: TileType.UNPOWERED_ZONE,
+                });
+
+                this.tileSpecs[TileType.UNPOWERED_ZONE] = new TileSpec(TileType.UNPOWERED_ZONE, {
+                    name: 'Unpowered Residential Zone',
+                    canBulldoze: true,
+                    canBurn: true,
+                    canConduct: true,
+                    isZone: true,
+                    isCombustible: true,
+                    population: 5,
+                    pollutionValue: 2,
+                    description: 'Housing without power.',
+                    onPower: TileType.POWERED_ZONE,
+                });
+
+                this.tileSpecs[TileType.COMMERCIAL_ZONE] = new TileSpec(TileType.COMMERCIAL_ZONE, {
+                    name: 'Commercial Zone',
+                    canBulldoze: true,
+                    canBurn: true,
+                    canConduct: true,
+                    isZone: true,
+                    isCombustible: true,
+                    population: 20,
+                    pollutionValue: 3,
+                    description: 'Businesses and shops.',
+                    onPower: TileType.POWERED_ZONE,
+                    onShutdown: TileType.UNPOWERED_ZONE,
+                });
+
+                this.tileSpecs[TileType.INDUSTRIAL_ZONE] = new TileSpec(TileType.INDUSTRIAL_ZONE, {
+                    name: 'Industrial Zone',
+                    canBulldoze: true,
+                    canBurn: true,
+                    canConduct: true,
+                    isZone: true,
+                    isCombustible: true,
+                    population: 30,
+                    pollutionValue: 10,
+                    description: 'Factories and plants.',
+                    onPower: TileType.POWERED_ZONE,
+                    onShutdown: TileType.UNPOWERED_ZONE,
+                });
+
+                // Special Buildings
+                this.tileSpecs[TileType.POWER_PLANT] = new TileSpec(TileType.POWER_PLANT, {
+                    name: 'Power Plant',
+                    canBulldoze: true,
+                    canBurn: true,
+                    canConduct: true,
+                    isCombustible: true,
+                    pollutionValue: 15,
+                    description: 'Generates power for the city.',
+                });
+
+                this.tileSpecs[TileType.NUCLEAR_PLANT] = new TileSpec(TileType.NUCLEAR_PLANT, {
+                    name: 'Nuclear Plant',
+                    canBulldoze: true,
+                    canBurn: true,
+                    canConduct: true,
+                    isCombustible: true,
+                    pollutionValue: 5,
+                    description: 'Provides large amounts of power.',
+                    onMeltdown: TileType.RADIOACTIVE,
+                });
+
+                this.tileSpecs[TileType.FIRE_STATION] = new TileSpec(TileType.FIRE_STATION, {
+                    name: 'Fire Station',
+                    canBulldoze: true,
+                    canBurn: true,
+                    canConduct: true,
+                    isCombustible: true,
+                    description: 'Provides fire coverage.',
+                });
+
+                this.tileSpecs[TileType.POLICE_STATION] = new TileSpec(TileType.POLICE_STATION, {
+                    name: 'Police Station',
+                    canBulldoze: true,
+                    canBurn: true,
+                    canConduct: true,
+                    isCombustible: true,
+                    description: 'Provides police coverage.',
+                });
+
+                // Disaster and Special Tiles
+                this.tileSpecs[TileType.FIRE] = new TileSpec(TileType.FIRE, {
+                    name: 'Fire',
+                    canBulldoze: true,
+                    canBurn: false,
+                    canConduct: false,
+                    isCombustible: false,
+                    isIndestructible: false,
+                    description: 'A raging fire.',
+                    onExtinguish: TileType.RUBBLE,
+                });
+
+                this.tileSpecs[TileType.RUBBLE] = new TileSpec(TileType.RUBBLE, {
+                    name: 'Rubble',
+                    canBulldoze: true,
+                    canBurn: false,
+                    canConduct: false,
+                    isCombustible: false,
+                    description: 'Debris from destroyed structures.',
+                });
+
+                this.tileSpecs[TileType.RADIOACTIVE] = new TileSpec(TileType.RADIOACTIVE, {
+                    name: 'Radioactive',
+                    canBulldoze: false,
+                    canBurn: false,
+                    canConduct: false,
+                    isCombustible: false,
+                    isIndestructible: true,
+                    description: 'Contaminated area.',
+                });
+            }
+
+            getSpec(tileType) {
+                return this.tileSpecs[tileType];
+            }
+        }
+
+        const tiles = new Tiles();
+
+        // -------- Tile Class --------
+        class Tile {
+            constructor(tileType) {
+                this.tileType = tileType;
+                this.spec = tiles.getSpec(tileType);
+                this.initializeProperties();
+            }
+
+            initializeProperties() {
+                // General properties
+                this.isPowered = false;
+                this.population = this.spec.population || 0;
+                this.pollutionLevel = 0;
+                this.crimeRate = 0;
+                this.landValue = 50;
+                this.fireRisk = 0;
+                this.level = 1;
+                this.powerConsumption = 0;
+                this.poweredThisCycle = false;
+                this.trafficDensity = 0;
+                this.crimeInfluence = 0;
+                this.pollutionInfluence = 0;
+                this.behavior = null;
+            }
+
+            setPowerConsumption() {
+                if (this.spec.tileType === TileType.POWER_PLANT) {
+                    this.powerConsumption = -50;
+                } else if (this.spec.isZone) {
+                    this.powerConsumption = this.level;
+                } else {
+                    this.powerConsumption = 0;
+                }
+            }
+
+            canConductPower() {
+                return this.spec.canConduct;
+            }
+
+            isCombustible() {
+                return this.spec.isCombustible;
+            }
+
+            isZone() {
+                return this.spec.isZone;
+            }
+
+            isRoad() {
+                return this.spec.tileType === TileType.ROAD || this.spec.tileType === TileType.HIGH_TRAFFIC_ROAD;
+            }
+
+            isBuildable() {
+                return this.spec.canBulldoze && !this.spec.overWater;
+            }
+
+            transform(tileType) {
+                this.tileType = tileType;
+                this.spec = tiles.getSpec(tileType);
+                this.initializeProperties();
+                this.setPowerConsumption();
+            }
+
+            setBehavior(behaviorClass) {
+                this.behavior = new behaviorClass(this);
+            }
+
+            applyBehavior() {
+                if (this.behavior) {
+                    this.behavior.applyBehavior();
+                }
+            }
+
+            upgrade() {
+                if (this.level < 3) {
+                    this.level++;
+                    this.setPowerConsumption();
+                }
+            }
+
+            downgrade() {
+                if (this.level > 1) {
+                    this.level--;
+                    this.setPowerConsumption();
+                }
+            }
+        }
+
+        // -------- TileBehavior Base Class --------
+        class TileBehavior {
+            constructor(tile) {
+                this.tile = tile;
+            }
+
+            applyBehavior() {
+                // To be implemented by subclasses
+            }
+        }
+
+        // -------- Behavior Subclasses --------
+
+        class ResidentialBehavior extends TileBehavior {
+            applyBehavior() {
+                // Implement residential zone behavior
+                const engine = this.tile.cityMap.engine;
+                const cityStats = engine.cityStats;
+
+                const demandFactor = cityStats.residentialDemand * engine.demandCoefficient;
+                const growthRate = demandFactor - this.tile.pollutionLevel * 0.001 - this.tile.crimeRate * 0.001;
+                const landValueFactor = (this.tile.landValue - 50) * 0.01;
+
+                if (this.tile.isPowered) {
+                    this.tile.population += (growthRate + landValueFactor) * this.tile.level;
+                } else {
+                    this.tile.population -= 1;
+                }
+
+                this.tile.population = Math.max(0, this.tile.population);
+
+                engine.adjustTileLevel(this.tile);
+
+                this.tile.landValue = engine.calculateLandValue(this.tile.x, this.tile.y);
+                this.tile.pollutionLevel = engine.calculatePollution(this.tile.x, this.tile.y);
+                this.tile.crimeRate = engine.calculateCrimeRate(this.tile.x, this.tile.y);
+                this.tile.fireRisk = engine.calculateFireRisk(this.tile);
+            }
+        }
+
+        class CommercialBehavior extends TileBehavior {
+            applyBehavior() {
+                // Implement commercial zone behavior
+                // Similar to ResidentialBehavior
+            }
+        }
+
+        class IndustrialBehavior extends TileBehavior {
+            applyBehavior() {
+                // Implement industrial zone behavior
+                // Similar to ResidentialBehavior, with adjustments for pollution
+            }
+        }
+
+        class FireBehavior extends TileBehavior {
+            applyBehavior() {
+                const engine = this.tile.cityMap.engine;
+                engine.spreadFire(this.tile, this.tile.x, this.tile.y);
+            }
+        }
+
+        // -------- MapScanner Class --------
+        class MapScanner {
+            constructor(cityMap) {
+                this.cityMap = cityMap;
+            }
+
+            scan() {
+                for (let y = 0; y < this.cityMap.height; y++) {
+                    for (let x = 0; x < this.cityMap.width; x++) {
+                        const tile = this.cityMap.getTile(x, y);
+                        this.processTile(tile, x, y);
+                    }
+                }
+            }
+
+            processTile(tile, x, y) {
+                tile.x = x;
+                tile.y = y;
+
+                // Assign behavior based on tile type
+                switch (tile.tileType) {
+                    case TileType.RESIDENTIAL_ZONE:
+                    case TileType.POWERED_ZONE:
+                    case TileType.UNPOWERED_ZONE:
+                        tile.setBehavior(ResidentialBehavior);
+                        break;
+                    case TileType.COMMERCIAL_ZONE:
+                        tile.setBehavior(CommercialBehavior);
+                        break;
+                    case TileType.INDUSTRIAL_ZONE:
+                        tile.setBehavior(IndustrialBehavior);
+                        break;
+                    case TileType.FIRE:
+                        tile.setBehavior(FireBehavior);
+                        break;
+                    default:
+                        tile.behavior = null;
+                }
+
+                // Apply the behavior
+                tile.applyBehavior();
+            }
+        }
+
+        // -------- TrafficSimulator Class --------
+        class TrafficSimulator {
+            constructor(cityMap) {
+                this.cityMap = cityMap;
+                this.maxTrafficDistance = 30;
+            }
+
+            simulateTraffic() {
+                // Reset traffic densities
+                for (let y = 0; y < this.cityMap.height; y++) {
+                    for (let x = 0; x < this.cityMap.width; x++) {
+                        const tile = this.cityMap.getTile(x, y);
+                        if (tile.isRoad()) {
+                            tile.trafficDensity = 0;
+                        }
+                    }
+                }
+
+                const residentialTiles = this.cityMap.findTilesByType(TileType.RESIDENTIAL_ZONE);
+                for (const resTileData of residentialTiles) {
+                    this.generateTrafficFromTile(resTileData.x, resTileData.y);
+                }
+            }
+
+            generateTrafficFromTile(x, y) {
+                const destinations = [
+                    ...this.cityMap.findTilesByType(TileType.COMMERCIAL_ZONE),
+                    ...this.cityMap.findTilesByType(TileType.INDUSTRIAL_ZONE),
+                ];
+
+                if (destinations.length === 0) return;
+
+                const destination = destinations[Math.floor(Math.random() * destinations.length)];
+                const path = this.findPath({ x, y }, destination);
+                if (path) {
+                    for (const node of path) {
+                        const tile = this.cityMap.getTile(node.x, node.y);
+                        if (tile.isRoad()) {
+                            tile.trafficDensity += 10;
+                            tile.trafficDensity = Math.min(255, tile.trafficDensity);
+                        }
+                    }
+                }
+            }
+
+            findPath(start, end) {
+                // Implement A* pathfinding algorithm
+                // Return an array of nodes representing the path
+                // For brevity, a simplified version is provided
+                const openSet = [];
+                const cameFrom = {};
+                const gScore = {};
+                const fScore = {};
+
+                const startKey = `${start.x},${start.y}`;
+                const endKey = `${end.x},${end.y}`;
+
+                gScore[startKey] = 0;
+                fScore[startKey] = this.heuristicCostEstimate(start, end);
+                openSet.push(start);
+
+                while (openSet.length > 0) {
+                    // Get the node in openSet having the lowest fScore[] value
+                    let current = openSet.reduce((prev, curr) => {
+                        const currKey = `${curr.x},${curr.y}`;
+                        const prevKey = `${prev.x},${prev.y}`;
+                        return fScore[currKey] < fScore[prevKey] ? curr : prev;
+                    });
+
+                    const currentKey = `${current.x},${current.y}`;
+
+                    if (currentKey === endKey) {
+                        // Reconstruct path
+                        const path = [];
+                        while (currentKey in cameFrom) {
+                            path.unshift(current);
+                            current = cameFrom[currentKey];
+                            currentKey = `${current.x},${current.y}`;
+                        }
+                        return path;
+                    }
+
+                    openSet.splice(openSet.indexOf(current), 1);
+
+                    const neighbors = this.getNeighbors(current.x, current.y);
+                    for (const neighbor of neighbors) {
+                        if (!neighbor.tile.isRoad() && !neighbor.tile.isZone()) continue;
+
+                        const neighborKey = `${neighbor.x},${neighbor.y}`;
+                        const tentativeGScore = gScore[currentKey] + 1;
+
+                        if (tentativeGScore < (gScore[neighborKey] || Infinity)) {
+                            cameFrom[neighborKey] = current;
+                            gScore[neighborKey] = tentativeGScore;
+                            fScore[neighborKey] = gScore[neighborKey] + this.heuristicCostEstimate(neighbor, end);
+                            if (!openSet.some(n => n.x === neighbor.x && n.y === neighbor.y)) {
+                                openSet.push(neighbor);
+                            }
+                        }
+                    }
+                }
+
+                return null; // No path found
+            }
+
+            heuristicCostEstimate(a, b) {
+                // Use Manhattan distance as heuristic
+                return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+            }
+
+            getNeighbors(x, y) {
+                const neighbors = [];
+                const directions = [
+                    { dx: -1, dy: 0 },
+                    { dx: 1, dy: 0 },
+                    { dx: 0, dy: -1 },
+                    { dx: 0, dy: 1 },
+                ];
+                for (const dir of directions) {
+                    const nx = x + dir.dx;
+                    const ny = y + dir.dy;
+                    if (this.cityMap.isInBounds(nx, ny)) {
+                        neighbors.push({ x: nx, y: ny, tile: this.cityMap.getTile(nx, ny) });
+                    }
+                }
+                return neighbors;
+            }
+        }
+
+                // -------- Budget Manager Class --------
+                class BudgetManager {
+            constructor() {
+                // Reference to city statistics
+                this.totalFunds = 10000; // Starting funds
+                this.taxRate = 7; // Default tax rate in percent
+
+                // Funding levels for services (percentages)
+                this.roadFunding = 1.0; // 100%
+                this.fireFunding = 1.0; // 100%
+                this.policeFunding = 1.0; // 100%
+
+                // Tracking funds collected and spent between budget cycles
+                this.taxCollected = 0;
+                this.roadExpenses = 0;
+                this.fireExpenses = 0;
+                this.policeExpenses = 0;
+
+                // For budget cycle
+                this.budgetCycleLength = 12; // E.g., 12 timesteps represent a year
+            }
+
+            collectTaxes() {
+                // Implement tax collection logic
+            }
+
+            calculateExpenses(cityMap) {
+                // Implement expense calculation logic
+            }
+
+            processBudget() {
+                // Implement budget processing logic
+            }
+
+            adjustTotalFunds(amount) {
+                this.totalFunds += amount;
+                if (this.totalFunds < 0) {
+                    this.totalFunds = 0;
+                    this.autoAdjustFunding();
+                }
+            }
+
+            autoAdjustFunding() {
+                // Automatically adjust funding levels to handle deficit
+            }
+        }
+
+        // --------  CityEvaluator Classes --------
+        // Implemented with detailed algorithms similar to the original Java code
+        // Omitted here due to space constraints
+
+        // -------- Simulation Engine --------
+        class SimulationEngine {
+            constructor(cityMap, cityStats, budgetManager, messageCenter) {
+                this.cityMap = cityMap;
+                this.cityStats = cityStats;
+                this.budgetManager = budgetManager;
+                this.messageCenter = messageCenter;
+                this.timeStep = 0;
+                this.eventListeners = [];
+                this.random = Math.random;
+                this.budgetCycleLength = this.budgetManager.budgetCycleLength;
+                this.demandCoefficient = 0.0001;
+                this.mapScanner = new MapScanner(cityMap);
+                this.trafficSimulator = new TrafficSimulator(cityMap);
+                this.cityEvaluator = new CityEvaluator(cityStats, cityMap, budgetManager, messageCenter);
+            }
+
+            simulateStep() {
+                this.timeStep++;
+                this.cityStats.time = this.timeStep;
+
+                // Collect taxes partially and calculate expenses
+                this.budgetManager.collectTaxPartial(this.cityStats);
+
+                // Update power grid
+                this.updatePowerGrid();
+
+                // Process map scanning for tile behaviors
+                this.mapScanner.scan();
+
+                // Simulate traffic with advanced pathfinding
+                this.trafficSimulator.simulateTraffic();
+
+                // Update city statistics
+                this.cityStats.update(this.cityMap);
+
+                // Evaluate the city
+                this.cityEvaluator.evaluateCity();
+
+                // Process messages/events
+                this.processProblems();
+
+                // At the end of the budget cycle, process the budget
+                if (this.timeStep % this.budgetCycleLength === 0) {
+                    this.budgetManager.collectTax(this.cityStats);
+                }
+
+                // Notify event listeners if needed
+            }
+
+            updatePowerGrid() {
+                // Implement power distribution as before
+            }
+
+            adjustTileLevel(tile) {
+                // Adjust the tile's development level based on conditions
+            }
+
+            calculateLandValue(x, y) {
+                // Calculate land value based on various factors
+            }
+
+            calculatePollution(x, y) {
+                // Calculate pollution level for a tile
+            }
+
+            calculateCrimeRate(x, y) {
+                // Calculate crime rate for a tile
+            }
+
+            calculateFireRisk(tile) {
+                // Calculate fire risk for a tile
+            }
+
+            spreadFire(tile, x, y) {
+                // Implement fire spreading logic
+            }
+
+            processProblems() {
+                // Handle city problems and generate messages
+            }
+        }
+
+        class CityMap {
+            constructor(width, height) {
+                this.width = width;
+                this.height = height;
+                this.tiles = Array.from({ length: height }, () => Array.from({ length: width }, () => new Tile(TileType.DIRT)));
+            }
+
+            isInBounds(x, y) {
+                return x >= 0 && x < this.width && y >= 0 && y < this.height;
+            }
+
+            getTile(x, y) {
+                if (this.isInBounds(x, y)) {
+                    return this.tiles[y][x];
+                }
+                return null;
+            }
+
+            setTile(x, y, tile) {
+                if (this.isInBounds(x, y)) {
+                    this.tiles[y][x] = tile;
+                }
+            }
+
+            findTilesByType(tileType) {
+                const tiles = [];
+                for (let y = 0; y < this.height; y++) {
+                    for (let x = 0; x < this.width; x++) {
+                        if (this.tiles[y][x].tileType === tileType) {
+                            tiles.push({ x, y, tile: this.tiles[y][x] });
+                        }
+                    }
+                }
+                return tiles;
+            }
+        }
+
+        class CityStatistics {
+            constructor() {
+                // Population statistics
+                this.totalPopulation = 0;
+                this.residentialPopulation = 0;
+                this.commercialPopulation = 0;
+                this.industrialPopulation = 0;
+
+                // Economic indicators
+                this.residentialDemand = 50;
+                this.commercialDemand = 50;
+                this.industrialDemand = 50;
+                this.taxIncome = 0;
+                this.expenses = 0;
+
+                // Environmental metrics
+                this.totalPollution = 0;
+                this.averagePollution = 0;
+                this.totalTraffic = 0;
+                this.averageTraffic = 0;
+
+                // Crime and safety
+                this.crimeRate = 0;
+                this.fireCoverage = 0;
+                this.policeCoverage = 0;
+
+                // Power and infrastructure
+                this.powerCoverage = 0;
+                this.powerDemand = 0;
+                this.powerSupply = 0;
+
+                // Time tracking
+                this.time = 0;
+                this.lastUpdate = 0;
+
+                // City rating
+                this.cityRating = 500;
+            }
+
+            update(cityMap) {
+                this.lastUpdate = this.time;
+                
+                // Reset counters
+                this.totalPopulation = 0;
+                this.residentialPopulation = 0;
+                this.commercialPopulation = 0;
+                this.industrialPopulation = 0;
+                this.totalPollution = 0;
+                this.totalTraffic = 0;
+                
+                // Scan the map and update statistics
+                for (let y = 0; y < cityMap.height; y++) {
+                    for (let x = 0; x < cityMap.width; x++) {
+                        const tile = cityMap.getTile(x, y);
+                        
+                        // Update population counts
+                        if (tile.spec.isZone) {
+                            this.totalPopulation += tile.population;
+                            switch (tile.tileType) {
+                                case TileType.RESIDENTIAL_ZONE:
+                                    this.residentialPopulation += tile.population;
+                                    break;
+                                case TileType.COMMERCIAL_ZONE:
+                                    this.commercialPopulation += tile.population;
+                                    break;
+                                case TileType.INDUSTRIAL_ZONE:
+                                    this.industrialPopulation += tile.population;
+                                    break;
+                            }
+                        }
+                        
+                        // Update pollution and traffic
+                        this.totalPollution += tile.pollutionLevel || 0;
+                        if (tile.isRoad()) {
+                            this.totalTraffic += tile.trafficDensity || 0;
+                        }
+                    }
+                }
+                
+                // Calculate averages
+                const totalTiles = cityMap.width * cityMap.height;
+                this.averagePollution = this.totalPollution / totalTiles;
+                this.averageTraffic = this.totalTraffic / totalTiles;
+                
+                // Update demands based on various factors
+                this.updateDemands();
+                
+                // Update city rating
+                this.updateCityRating();
+            }
+
+            updateDemands() {
+                // Simple demand calculation - can be made more complex
+                this.residentialDemand = Math.max(0, Math.min(100,
+                    50 + (this.commercialPopulation + this.industrialPopulation - this.residentialPopulation) / 100
+                ));
+                
+                this.commercialDemand = Math.max(0, Math.min(100,
+                    50 + (this.residentialPopulation - this.commercialPopulation) / 100
+                ));
+                
+                this.industrialDemand = Math.max(0, Math.min(100,
+                    50 + (this.residentialPopulation - this.industrialPopulation) / 100
+                ));
+            }
+
+            updateCityRating() {
+                // Calculate city rating based on various factors
+                this.cityRating = Math.max(0, Math.min(1000,
+                    500 
+                    + (this.totalPopulation / 100)
+                    - (this.averagePollution * 2)
+                    - (this.crimeRate * 2)
+                    + (this.fireCoverage * 100)
+                    + (this.policeCoverage * 100)
+                    - (this.averageTraffic)
+                ));
+            }
+        }
+
+        // -------- Initialization and Simulation --------
+        const cityMap = new CityMap(50, 50);
+        const cityStats = new CityStatistics();
+        const budgetManager = new BudgetManager();
+        const messageCenter = new MessageCenter();
+        const engine = new SimulationEngine(cityMap, cityStats, budgetManager, messageCenter);
+
+        cityMap.engine = engine;
+        cityStats.engine = engine;
+
+        // Implement tools (BulldozerTool, ZoneTool, etc.) and construct the city
+        // For brevity, this implementation is omitted
+
+        // Run the simulation
+        function simulate() {
+            for (let i = 0; i < 36; i++) {
+                engine.simulateStep();
+
+                // Update the city grid display
+                renderCityGrid();
+
+                if (engine.timeStep % engine.budgetCycleLength === 0) {
+                    console.log(`Time Step: ${engine.timeStep}`);
+                    console.log(`Total Population: ${cityStats.totalPopulation.toFixed(2)}`);
+                    // Output other city statistics and messages
+                }
+            }
+        }
+
+        // Simple renderer for the city grid
+        function renderCityGrid() {
+            const gridContainer = document.getElementById('city-grid');
+            gridContainer.innerHTML = '';
+
+            for (let y = 0; y < cityMap.height; y++) {
+                for (let x = 0; x < cityMap.width; x++) {
+                    const tile = cityMap.getTile(x, y);
+                    const tileDiv = document.createElement('div');
+                    tileDiv.className = `tile ${tile.tileType}`;
+                    gridContainer.appendChild(tileDiv);
+                }
+            }
+        }
+
+        // Start the simulation
+        simulate();
+
+    </script>
+</body>
+</html>
