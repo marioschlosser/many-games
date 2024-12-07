@@ -1,0 +1,1910 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Voxel Space Engine</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: black; }
+        canvas { image-rendering: pixelated; }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/simplex-noise/2.4.0/simplex-noise.min.js"></script>
+</head>
+<body>
+    <canvas id="screen"></canvas>
+    <script>
+        const gameStyles = document.createElement('style');
+        gameStyles.textContent = `
+            @keyframes hudPulse {
+                0% { opacity: 0.8; }
+                50% { opacity: 1; }
+                100% { opacity: 0.8; }
+            }
+
+            @keyframes warningFlash {
+                0% { background-color: rgba(255,0,0,0.2); }
+                50% { background-color: rgba(255,0,0,0.4); }
+                100% { background-color: rgba(255,0,0,0.2); }
+            }
+
+            .hud-element {
+                position: absolute;
+                color: #0ff;
+                font-family: 'Orbitron', sans-serif;
+                text-shadow: 0 0 5px rgba(0,255,255,0.5);
+                pointer-events: none;
+            }
+
+            .hud-container {
+                border: 2px solid rgba(0,255,255,0.3);
+                background: rgba(0,20,40,0.3);
+                backdrop-filter: blur(2px);
+                border-radius: 10px;
+                padding: 10px;
+                box-shadow: 0 0 10px rgba(0,255,255,0.2);
+            }
+        `;
+        document.head.appendChild(gameStyles);
+
+        const canvas = document.getElementById('screen');
+        const ctx = canvas.getContext('2d');
+        const SCREEN_WIDTH = 960;
+        const SCREEN_HEIGHT = 600;
+        const MAP_SIZE = 1536;
+
+        const GRAVITY = 0.5;
+        const MISSILE_SPEED = 15;
+        const MISSILE_SIZE = 10;
+        const MISSILE_LIFETIME = 6000; // ms before we remove it if it never hits ground
+
+        // Explosion parameters
+        const EXPLOSION_DURATION = 500; // ms
+        const EXPLOSION_SIZE = 50;
+
+        // Add these constants at the top
+        const MINIMAP_SIZE = 150;  // Size of the minimap in pixels
+        const MINIMAP_SCALE = MAP_SIZE / MINIMAP_SIZE;  // Scale factor for converting world to minimap coordinates
+
+        const MAX_ENERGY = 100;
+        const COLLISION_DAMAGE_FACTOR = 15;  // How much speed affects damage
+        const BOUNCE_FACTOR = 0.5;  // How much speed is retained in bounce
+        const RECOVERY_RATE = 0.02;  // Energy recovery per frame when not damaged
+
+        let energy = MAX_ENERGY;
+        let lastCollisionTime = 0;
+        const COLLISION_COOLDOWN = 500; // ms between collision damage
+
+        // Arrays to hold active missiles and explosions
+        let missiles = [];
+        let explosions = [];
+
+        let lastLogTime = 0;
+        
+        let isNightTime = true;
+        
+        // Set up scaled canvas
+        canvas.width = SCREEN_WIDTH;
+        canvas.height = SCREEN_HEIGHT;
+        canvas.style.width = '100vw';
+        canvas.style.height = '100vh';
+        
+        // Modify these constants at the top
+        let speed = 0;          // Current forward speed
+        let verticalSpeed = 0;  // Current vertical speed
+        let turnSpeed = 0;      // Current turning speed
+        const MAX_SPEED = 15;   // Maximum forward speed
+        const MIN_SPEED = 0;    // Minimum forward speed (no reverse)
+        const ACCELERATION = 0.3;  // Increased from 0.2
+        const TURN_ACCELERATION = 0.004;  // Doubled from 0.002
+        const MAX_TURN_SPEED = 0.06;  // Increased from 0.04
+        const VERTICAL_ACCEL = 0.5;  // How fast we change vertical speed
+        const MAX_VERTICAL_SPEED = 5;  // Maximum up/down speed
+        const DRAG = 0.99;      // Increased from 0.98 (less drag)
+
+        let lastMouseX = 0;
+        
+        // Camera position and angle
+        let camera = {
+            x: MAP_SIZE/2,
+            y: MAP_SIZE/2,
+            z: 100,
+            angle: 0,
+            horizon: SCREEN_HEIGHT/2 - 40,
+            distance: 800
+        };
+
+        // Add these constants at the top
+        const ENEMY_SIZE = 30;
+        const ENEMY_SPEED = 1;
+        const NUM_ENEMIES = 3;
+        const PAUSE_CHANCE = 0.005;     // 0.5% chance to pause each frame
+        const RESUME_CHANCE = 0.02;     // 2% chance to resume each frame
+        const DIRECTION_CHANGE_CHANCE = 0.005;  // 0.5% chance to change direction
+
+        const ENEMY_HITBOX_SIZE = 15;  // Size of enemy collision box
+        const EXPLOSION_DAMAGE_RADIUS = 50;  // How far explosion damage reaches
+
+        const GAME_OVER_FADE_DURATION = 2000; // 2 seconds to fade in game over screen
+
+        // Add game state tracking
+        let isGameOver = false;
+        let gameOverStartTime = 0;
+
+        // Add this to store enemies
+        let enemies = [];
+        let enemiesDestroyed = 0;
+
+        // Generate heightmap and colormap
+        const heightmap = new Float32Array(MAP_SIZE * MAP_SIZE);
+        const colormap = new Uint32Array(MAP_SIZE * MAP_SIZE);
+
+        // Create depth buffer
+        let depthBuffer = new Float32Array(SCREEN_WIDTH * SCREEN_HEIGHT);
+        depthBuffer.fill(Infinity);
+
+        // Add game state
+        let gameStarted = false;
+
+        // -------------------------------------------
+        // MISSILE FUNCTIONS
+        // -------------------------------------------
+
+        function fireMissile() {
+            // Create a missile at camera position:
+            // angle is camera.angle; we shoot forward with some upward velocity
+            const missile = {
+                x: camera.x,
+                y: camera.y,
+                z: camera.z - 10,
+                dx: Math.cos(camera.angle) * MISSILE_SPEED,
+                dy: Math.sin(camera.angle) * MISSILE_SPEED,
+                dz: 5, // initial upward velocity
+                birthTime: Date.now()
+            };
+            missiles.push(missile);
+        }
+
+        function updateMissiles() {
+            for (let i = missiles.length - 1; i >= 0; i--) {
+                const m = missiles[i];
+                
+                // Update position with simple physics
+                m.x += m.dx;
+                m.y += m.dy;
+                m.z += m.dz;
+                m.dz -= GRAVITY;
+                
+                // Wrap positions to avoid indexing errors if you have wrap logic
+                m.x = wrapPosition(m.x, MAP_SIZE);
+                m.y = wrapPosition(m.y, MAP_SIZE);
+                
+                const mapX = Math.floor(m.x) % MAP_SIZE;
+                const mapY = Math.floor(m.y) % MAP_SIZE;
+
+                // Check collision with enemies
+                for (let j = enemies.length - 1; j >= 0; j--) {
+                    const enemy = enemies[j];
+                    const dx = m.x - enemy.x;
+                    const dy = m.y - enemy.y;
+                    const dz = m.z - enemy.z;
+                    const distance = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                    
+                    if (distance < ENEMY_HITBOX_SIZE) {
+                        // Direct hit!
+                        destroyEnemy(enemy);
+                        
+                        missiles.splice(i, 1);
+                        enemies.splice(j, 1);
+                        return;  // Exit since missile is gone
+                    }
+                }
+
+                const groundHeight = heightmap[mapY * MAP_SIZE + mapX];
+                
+                // Check if missile hits ground
+                if (m.z <= groundHeight) {
+                    // Explosion!
+                    spawnExplosion(m.x, m.y, groundHeight);
+                    missiles.splice(i, 1);
+                } else {
+                    // Check lifetime
+                    if (Date.now() - m.birthTime > MISSILE_LIFETIME) {
+                        // Missile just disappears if too long in air
+                        missiles.splice(i, 1);
+                    }
+                }
+            }
+        }
+
+        function drawMissiles() {
+            for (const m of missiles) {
+                const { vertices: missileVerts, edges: missileEdges } = createCube(m.x, m.y, m.z, 2);
+                drawPolygonWithDepth(missileVerts, missileEdges, 2, [200, 200, 200, 255]);
+            }
+        }
+
+        // -------------------------------------------
+        // EXPLOSION FUNCTIONS
+        // -------------------------------------------
+        function spawnExplosion(x, y, z) {
+            // Represent explosion as a temporary polygon, say a cube or a spiky shape
+            const explosion = {
+                x: x,
+                y: y,
+                z: z + 10,
+                birthTime: Date.now(),
+            };
+            explosions.push(explosion);
+        }
+
+        function updateExplosions() {
+            for (let i = explosions.length - 1; i >= 0; i--) {
+                const ex = explosions[i];
+                
+                // Check for enemy damage from explosion
+                for (let j = enemies.length - 1; j >= 0; j--) {
+                    const enemy = enemies[j];
+                    const dx = ex.x - enemy.x;
+                    const dy = ex.y - enemy.y;
+                    const dz = ex.z - enemy.z;
+                    const distance = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                    
+                    if (distance < EXPLOSION_DAMAGE_RADIUS) {
+                        // Enemy caught in explosion
+                        spawnExplosion(enemy.x, enemy.y, enemy.z);  // Secondary explosion
+                        enemies.splice(j, 1);
+                    }
+                }
+                
+                // Remove old explosions
+                if (Date.now() - ex.birthTime > EXPLOSION_DURATION) {
+                    explosions.splice(i, 1);
+                }
+            }
+        }
+
+        function createStarExplosionLines(cx, cy, cz, size) {
+            const vertices = [];
+            const edges = [];
+
+            // We'll have one central vertex (the center) and 16 endpoints.
+            // Actually, we can just define lines from the center to endpoints.
+            // The center will be vertex 0:
+            const vCenter = { x: cx, y: cy, z: cz };
+            vertices.push(vCenter);
+
+            // Generate 8 lines in XY plane
+            const step = (2 * Math.PI) / 8; // 45 degrees in radians
+            let vertexIndex = 1; // start indexing new vertices from 1
+            for (let i = 0; i < 8; i++) {
+                const angle = i * step;
+                const vx = cx + size * Math.cos(angle);
+                const vy = cy + size * Math.sin(angle);
+                const vz = cz; 
+                vertices.push({ x: vx, y: vy, z: vz });
+                // Connect center (0) to this vertex (vertexIndex)
+                edges.push({ start: 0, end: vertexIndex });
+                vertexIndex++;
+            }
+
+            // Generate 8 lines in XZ plane
+            for (let i = 0; i < 8; i++) {
+                const angle = i * step;
+                const vx = cx + size * Math.cos(angle);
+                const vy = cy; 
+                const vz = cz + size * Math.sin(angle);
+                vertices.push({ x: vx, y: vy, z: vz });
+                edges.push({ start: 0, end: vertexIndex });
+                vertexIndex++;
+            }
+
+            return { vertices, edges };
+        }
+
+        function drawExplosions() {
+            for (const ex of explosions) {
+                // Make explosion grow/shrink or just appear as a fixed size cube
+                const age = Date.now() - ex.birthTime;
+                const t = age / EXPLOSION_DURATION;
+
+                if (t > 1) continue; // Explosion done, already removed elsewhere
+
+                const size = EXPLOSION_SIZE * t; // size grows from 0 at start to EXPLOSION_SIZE at the end
+                const alpha = 255 * (1 - t); // alpha starts at 255 (fully visible) and goes to 0 at the end
+                
+                const { vertices: explosionVerts, edges: explosionEdges } = createStarExplosionLines(ex.x, ex.y, ex.z, size);
+
+                //const { vertices: explosionVerts, edges: explosionEdges } = createOctahedron(ex.x, ex.y, ex.z, size);
+                drawPolygonWithDepth(explosionVerts, explosionEdges, 3, [255, 255, 0, alpha]);
+            }
+        }
+
+        function createCube(cx, cy, cz, size) {
+            const half = size / 2;
+
+            // Define vertices of the cube
+            // Bottom face (z - half)
+            const v0 = { x: cx - half, y: cy - half, z: cz - half };
+            const v1 = { x: cx + half, y: cy - half, z: cz - half };
+            const v2 = { x: cx + half, y: cy + half, z: cz - half };
+            const v3 = { x: cx - half, y: cy + half, z: cz - half };
+
+            // Top face (z + half)
+            const v4 = { x: cx - half, y: cy - half, z: cz + half };
+            const v5 = { x: cx + half, y: cy - half, z: cz + half };
+            const v6 = { x: cx + half, y: cy + half, z: cz + half };
+            const v7 = { x: cx - half, y: cy + half, z: cz + half };
+
+            const vertices = [v0, v1, v2, v3, v4, v5, v6, v7];
+
+            // Define edges by vertex indices
+            const edges = [
+                // Bottom face
+                { start: 0, end: 1 },
+                { start: 1, end: 2 },
+                { start: 2, end: 3 },
+                { start: 3, end: 0 },
+
+                // Top face
+                { start: 4, end: 5 },
+                { start: 5, end: 6 },
+                { start: 6, end: 7 },
+                { start: 7, end: 4 },
+
+                // Vertical edges connecting top and bottom
+                { start: 0, end: 4 },
+                { start: 1, end: 5 },
+                { start: 2, end: 6 },
+                { start: 3, end: 7 }
+            ];
+
+            return { vertices, edges };
+        }
+
+        function createMissile(cx, cy, cz, length, width, height) {
+            // Half sizes for convenience
+            const halfLength = length / 2;
+            const halfWidth = width / 2;
+            const halfHeight = height / 2;
+            
+            // Base of the missile (square)
+            // Positioned behind the apex
+            // Let's place the base centered at (cx - halfLength, cy, cz)
+            const v0 = { x: cx - halfLength, y: cy - halfWidth, z: cz - halfHeight }; // bottom-left
+            const v1 = { x: cx - halfLength, y: cy + halfWidth, z: cz - halfHeight }; // bottom-right
+            const v2 = { x: cx - halfLength, y: cy + halfWidth, z: cz + halfHeight }; // top-right
+            const v3 = { x: cx - halfLength, y: cy - halfWidth, z: cz + halfHeight }; // top-left
+
+            // Apex (tip) is at the front
+            // Positioned at (cx + halfLength, cy, cz)
+            const v4 = { x: cx + halfLength, y: cy, z: cz };
+            
+            const vertices = [v0, v1, v2, v3, v4];
+            
+            // Edges:
+            // Base square
+            // v0 - v1 - v2 - v3 - v0
+            // And apex connected to each base vertex
+            const edges = [
+                { start: 0, end: 1 },
+                { start: 1, end: 2 },
+                { start: 2, end: 3 },
+                { start: 3, end: 0 },
+                
+                // Apex to base vertices
+                { start: 4, end: 0 },
+                { start: 4, end: 1 },
+                { start: 4, end: 2 },
+                { start: 4, end: 3 }
+            ];
+
+            return { vertices, edges };
+        }
+
+        function createOctahedron(cx, cy, cz, size) {
+            const half = size / 2;
+            // Octahedron vertices:
+            // Top and bottom along Z
+            const vTop    = { x: cx,         y: cy,         z: cz + half };
+            const vBottom = { x: cx,         y: cy,         z: cz - half };
+            // Front and back along Y
+            const vFront  = { x: cx,         y: cy + half,  z: cz };
+            const vBack   = { x: cx,         y: cy - half,  z: cz };
+            // Left and right along X
+            const vLeft   = { x: cx - half,  y: cy,         z: cz };
+            const vRight  = { x: cx + half,  y: cy,         z: cz };
+
+            const vertices = [vTop, vBottom, vFront, vBack, vLeft, vRight];
+
+            // Edges of an octahedron:
+            // Connect top to each of the four side vertices: front, back, left, right
+            // Connect bottom to each of the four side vertices
+            // Connect side vertices in a loop (front-left, left-back, back-right, right-front)
+            const edges = [
+                // Top connections
+                { start: 0, end: 2 }, // top-front
+                { start: 0, end: 3 }, // top-back
+                { start: 0, end: 4 }, // top-left
+                { start: 0, end: 5 }, // top-right
+
+                // Bottom connections
+                { start: 1, end: 2 }, // bottom-front
+                { start: 1, end: 3 }, // bottom-back
+                { start: 1, end: 4 }, // bottom-left
+                { start: 1, end: 5 }, // bottom-right
+
+                // Side connections
+                { start: 2, end: 4 }, // front-left
+                { start: 4, end: 3 }, // left-back
+                { start: 3, end: 5 }, // back-right
+                { start: 5, end: 2 }  // right-front
+            ];
+
+            return { vertices, edges };
+        }
+
+        function drawPolygonWithDepth(vertices, edges, thickness = 1, color = [255, 255, 0, 255]) {
+            function setPixelWithDepth(x, y, distance, r, g, b, a, imageData) {
+                if (x < 0 || x >= SCREEN_WIDTH || y < 0 || y >= SCREEN_HEIGHT) return;
+                const index = (y * SCREEN_WIDTH + x);
+                if (distance < depthBuffer[index]) {
+                    depthBuffer[index] = distance;
+                    const offset = index * 4;
+                    imageData.data[offset] = r;
+                    imageData.data[offset + 1] = g;
+                    imageData.data[offset + 2] = b;
+                    imageData.data[offset + 3] = a;
+                }
+            }
+
+            function drawSinglePixelLineWithDepth(x0, y0, x1, y1, v1, v2, imageData, color) {
+                const dx = Math.abs(x1 - x0);
+                const sx = x0 < x1 ? 1 : -1;
+                const dy = -Math.abs(y1 - y0);
+                const sy = y0 < y1 ? 1 : -1;
+                let err = dx + dy;
+
+                // Length of the line for distance interpolation
+                const lineLen = Math.sqrt((v2.x - v1.x)**2 + (v2.y - v1.y)**2);
+
+                while (true) {
+                    // Interpolate distance along the line
+                    // Compute how far along the line we are (t)
+                    const curLen = Math.sqrt((x0 - v1.x)**2 + (y0 - v1.y)**2);
+                    const t = (lineLen === 0) ? 0 : (curLen / lineLen);
+                    const currentDistance = v1.distance + t*(v2.distance - v1.distance);
+
+                    setPixelWithDepth(x0, y0, currentDistance, color[0], color[1], color[2], color[3], imageData);
+
+                    if (x0 === x1 && y0 === y1) break;
+                    const e2 = 2*err;
+                    if (e2 >= dy) { err += dy; x0 += sx; }
+                    if (e2 <= dx) { err += dx; y0 += sy; }
+                }
+            }
+
+            function drawLineWithDepth(v1, v2, imageData, thickness, color) {
+                // Extract screen coords
+                let x0 = Math.floor(v1.x), y0 = Math.floor(v1.y);
+                let x1 = Math.floor(v2.x), y1 = Math.floor(v2.y);
+
+                // Determine line direction
+                const dx = x1 - x0;
+                const dy = y1 - y0;
+                
+                // If line is more horizontal than vertical, we'll offset vertically; otherwise offset horizontally.
+                let offsetDirX = 0;
+                let offsetDirY = 0;
+                if (Math.abs(dx) > Math.abs(dy)) {
+                    // Mostly horizontal line, offset vertically
+                    offsetDirX = 0;
+                    offsetDirY = 1;
+                } else {
+                    // Mostly vertical line, offset horizontally
+                    offsetDirX = 1;
+                    offsetDirY = 0;
+                }
+
+                // Draw multiple lines for thickness
+                const half = Math.floor(thickness / 2);
+                for (let o = -half; o <= half; o++) {
+                    drawSinglePixelLineWithDepth(x0 + o*offsetDirX, y0 + o*offsetDirY, x1 + o*offsetDirX, y1 + o*offsetDirY, v1, v2, imageData, color);
+                }
+            }
+
+            function projectVertex(vx, vy, vz) {
+                const dx = vx - camera.x;
+                const dy = vy - camera.y;
+                const dz = camera.z - vz;
+                const objectAngle = Math.atan2(dy, dx);
+                let dAngle = objectAngle - camera.angle;
+                if (dAngle > Math.PI) dAngle -= 2*Math.PI;
+                if (dAngle < -Math.PI) dAngle += 2*Math.PI;
+
+                if (Math.cos(dAngle) <= 0) return null;
+
+                const distance = Math.sqrt(dx*dx + dy*dy);
+                const screenX = SCREEN_WIDTH/2 + SCREEN_WIDTH * Math.tan(dAngle);
+                const screenY = camera.horizon + (dz / distance)*SCREEN_HEIGHT;
+
+                return { x: screenX, y: screenY, distance };
+            }
+
+            // Project vertices
+            const projected = vertices.map(v => projectVertex(v.x, v.y, v.z));
+
+            // Create an ImageData buffer for polygons
+            const polygonImageData = ctx.getImageData(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+
+            // For simplicity, let's just draw the edges as lines (wireframe):
+            for (const edge of edges) {
+                const v1 = projected[edge.start];
+                const v2 = projected[edge.end];
+                if (!v1 || !v2) continue;
+
+                drawLineWithDepth(v1, v2, polygonImageData, thickness, color);
+            }
+
+            // Put updated image data back
+            ctx.putImageData(polygonImageData, 0, 0);
+        }
+
+        function drawPolygon(vertices, edges) {
+            // Project a single vertex onto the screen
+            function projectVertex(vx, vy, vz) {
+                const dx = vx - camera.x;
+                const dy = vy - camera.y;
+                const dz = camera.z - vz; // Same sign convention as terrain/objects
+
+                // Angle from camera to the point
+                const objectAngle = Math.atan2(dy, dx);
+                
+                // Angle difference from camera's facing direction
+                let dAngle = objectAngle - camera.angle;
+                // Normalize angle difference to (-PI, PI)
+                if (dAngle > Math.PI) dAngle -= 2 * Math.PI;
+                if (dAngle < -Math.PI) dAngle += 2 * Math.PI;
+
+                // If the point is behind the camera or too far off to the side, skip
+                // cos(dAngle) > 0 means it's generally in front of camera
+                if (Math.cos(dAngle) <= 0) {
+                    return null; 
+                }
+
+                const distance = Math.sqrt(dx*dx + dy*dy);
+                
+                // Horizontal screen position
+                // screenX = center + width * tan(dAngle)
+                const screenX = SCREEN_WIDTH/2 + SCREEN_WIDTH * Math.tan(dAngle);
+
+                // Vertical screen position
+                // We use the same formula as for terrain and objects:
+                // screenY = camera.horizon + ((camera.z - vz) / distance) * SCREEN_HEIGHT
+                const screenY = camera.horizon + (dz / distance) * SCREEN_HEIGHT;
+                
+                return { x: screenX, y: screenY, distance };
+            }
+
+            // Project all vertices
+            const projected = vertices.map(v => projectVertex(v.x, v.y, v.z));
+
+            // Set stroke style for polygon lines
+            ctx.strokeStyle = 'yellow';
+            ctx.lineWidth = 2;
+
+            // Draw edges between projected vertices
+            ctx.beginPath();
+            for (const edge of edges) {
+                const v1 = projected[edge.start];
+                const v2 = projected[edge.end];
+                
+                // Only draw if both vertices are in front of camera and not null
+                if (v1 && v2) {
+                    ctx.moveTo(v1.x, v1.y);
+                    ctx.lineTo(v2.x, v2.y);
+                }
+            }
+            ctx.stroke();
+        }
+
+        // Generate terrain with two fixed peaks
+        function generateTerrain() {
+            // Initialize noise functions for different features
+            const mountainNoise = new SimplexNoise();
+            const hillNoise = new SimplexNoise();
+            const roughnessNoise = new SimplexNoise();
+
+            // Parameters for terrain features
+            const MOUNTAIN_SCALE = 0.003;  // Large features
+            const HILL_SCALE = 0.01;       // Medium features
+            const ROUGH_SCALE = 0.05;      // Small features
+            
+            const MOUNTAIN_HEIGHT = 300;
+            const HILL_HEIGHT = 100;
+            const ROUGH_HEIGHT = 20;
+            const BASE_HEIGHT = 50;
+
+            // Generate heightmap
+            for (let y = 0; y < MAP_SIZE; y++) {
+                for (let x = 0; x < MAP_SIZE; x++) {
+                    // Generate different layers of terrain
+                    const mountains = mountainNoise.noise2D(x * MOUNTAIN_SCALE, y * MOUNTAIN_SCALE);
+                    const hills = hillNoise.noise2D(x * HILL_SCALE, y * HILL_SCALE);
+                    const roughness = roughnessNoise.noise2D(x * ROUGH_SCALE, y * ROUGH_SCALE);
+
+                    // Combine layers with different weights
+                    let height = BASE_HEIGHT;
+                    height += mountains * MOUNTAIN_HEIGHT;
+                    height += hills * HILL_HEIGHT;
+                    height += roughness * ROUGH_HEIGHT;
+
+                    // Ensure minimum height and store
+                    height = Math.max(20, height);
+                    heightmap[y * MAP_SIZE + x] = height;
+                }
+            }
+
+            // Generate colors based on height and slope
+            for (let y = 0; y < MAP_SIZE; y++) {
+                for (let x = 0; x < MAP_SIZE; x++) {
+                    const idx = y * MAP_SIZE + x;
+                    const h = heightmap[idx];
+                    
+                    // Calculate local slope for more interesting coloring
+                    const slope = calculateSlope(x, y);
+                    
+                    // Color based on height and slope
+                    if (h < 50) {
+                        colormap[idx] = 0x000066;        // Deep water
+                    } else if (h < 60) {
+                        colormap[idx] = 0x000099;        // Shallow water
+                    } else if (h < 100) {
+                        colormap[idx] = 0x006633;        // Low ground
+                    } else if (h < 200) {
+                        // Mix between green and brown based on slope
+                        const mixFactor = Math.min(1, slope * 2);
+                        colormap[idx] = mixColors(0x009933, 0x996633, mixFactor);
+                    } else {
+                        // Higher areas get more grey/rocky
+                        const mixFactor = Math.min(1, (h - 200) / 100);
+                        colormap[idx] = mixColors(0x996633, 0x666666, mixFactor);
+                    }
+                }
+            }
+        }
+
+        // Helper function to calculate local slope
+        function calculateSlope(x, y) {
+            if (x === 0 || x === MAP_SIZE - 1 || y === 0 || y === MAP_SIZE - 1) return 0;
+            
+            const idx = y * MAP_SIZE + x;
+            const h = heightmap[idx];
+            const hL = heightmap[y * MAP_SIZE + (x - 1)];
+            const hR = heightmap[y * MAP_SIZE + (x + 1)];
+            const hU = heightmap[(y - 1) * MAP_SIZE + x];
+            const hD = heightmap[(y + 1) * MAP_SIZE + x];
+            
+            const dX = Math.abs(hR - hL) / 2;
+            const dY = Math.abs(hD - hU) / 2;
+            
+            return Math.sqrt(dX * dX + dY * dY) / 10;
+        }
+
+        // Helper function to mix colors
+        function mixColors(color1, color2, factor) {
+            const r1 = (color1 >> 16) & 0xFF;
+            const g1 = (color1 >> 8) & 0xFF;
+            const b1 = color1 & 0xFF;
+            
+            const r2 = (color2 >> 16) & 0xFF;
+            const g2 = (color2 >> 8) & 0xFF;
+            const b2 = color2 & 0xFF;
+            
+            const r = Math.floor(r1 + (r2 - r1) * factor);
+            const g = Math.floor(g1 + (g2 - g1) * factor);
+            const b = Math.floor(b1 + (b2 - b1) * factor);
+            
+            return (r << 16) | (g << 8) | b;
+        }
+
+        // Render one vertical column of the screen
+        function renderColumn(screenX, angle) {
+            const rayX = camera.x;
+            const rayY = camera.y;
+            const sinAngle = Math.sin(angle);
+            const cosAngle = Math.cos(angle);
+            
+            let z = 1;
+            let lastHeight = -1;
+            let skipCount = 0;
+
+            const columnPixels = new Uint32Array(SCREEN_HEIGHT);
+            const columnAlpha = new Uint8Array(SCREEN_HEIGHT).fill(0);
+            const columnDepth = new Float32Array(SCREEN_HEIGHT);
+            columnDepth.fill(Infinity);
+
+            while (z < camera.distance) {
+                // Adjust step size based on distance for smoother rendering
+                const stepSize = Math.max(0.1, z / 100);  // Smaller steps, especially close up
+                
+                const px = rayX + cosAngle * z;
+                const py = rayY + sinAngle * z;
+                
+                if (px < 0 || px >= MAP_SIZE || py < 0 || py >= MAP_SIZE) {
+                    z += stepSize;
+                    continue;
+                }
+                
+                // Bilinear interpolation for smoother height values
+                const mapX = Math.floor(px);
+                const mapY = Math.floor(py);
+                const fracX = px - mapX;
+                const fracY = py - mapY;
+                
+                // Get heights at four corners
+                const h00 = heightmap[Math.min(MAP_SIZE-1, mapY) * MAP_SIZE + Math.min(MAP_SIZE-1, mapX)];
+                const h10 = heightmap[Math.min(MAP_SIZE-1, mapY) * MAP_SIZE + Math.min(MAP_SIZE-1, mapX + 1)];
+                const h01 = heightmap[Math.min(MAP_SIZE-1, mapY + 1) * MAP_SIZE + Math.min(MAP_SIZE-1, mapX)];
+                const h11 = heightmap[Math.min(MAP_SIZE-1, mapY + 1) * MAP_SIZE + Math.min(MAP_SIZE-1, mapX + 1)];
+                
+                // Bilinear interpolation
+                const height = 
+                    h00 * (1 - fracX) * (1 - fracY) +
+                    h10 * fracX * (1 - fracY) +
+                    h01 * (1 - fracX) * fracY +
+                    h11 * fracX * fracY;
+                
+                const heightOnScreen = ((camera.z - height) / z * SCREEN_HEIGHT + camera.horizon)|0;
+                
+                if (lastHeight !== -1 && Math.abs(heightOnScreen - lastHeight) < 2) {
+                    skipCount++;
+                    if (skipCount > 3) {
+                        z += stepSize;
+                        continue;
+                    }
+                } else {
+                    skipCount = 0;
+                }
+                
+                lastHeight = heightOnScreen;
+                
+                if (heightOnScreen >= 0 && heightOnScreen < SCREEN_HEIGHT) {
+                    // Also interpolate colors for smoother appearance
+                    const idx = mapY * MAP_SIZE + mapX;
+                    const idx10 = mapY * MAP_SIZE + Math.min(MAP_SIZE-1, mapX + 1);
+                    const idx01 = Math.min(MAP_SIZE-1, mapY + 1) * MAP_SIZE + mapX;
+                    const idx11 = Math.min(MAP_SIZE-1, mapY + 1) * MAP_SIZE + Math.min(MAP_SIZE-1, mapX + 1);
+                    
+                    const c00 = colormap[idx];
+                    const c10 = colormap[idx10];
+                    const c01 = colormap[idx01];
+                    const c11 = colormap[idx11];
+                    
+                    // Interpolate colors
+                    const color = interpolateColors(c00, c10, c01, c11, fracX, fracY);
+                    
+                    // Apply fog
+                    const fogFactor = Math.min(1, z / camera.distance);
+                    const finalColor = blendColors(color, 0x000033, fogFactor);
+                    
+                    let y = heightOnScreen;
+                    while (y < SCREEN_HEIGHT && columnAlpha[y] === 0) {
+                        columnPixels[y] = finalColor;
+                        columnAlpha[y] = 255;
+                        columnDepth[y] = z;
+                        y++;
+                    }
+                }
+                
+                z += stepSize;
+            }
+            
+            // Draw the column
+            let top = SCREEN_HEIGHT;
+            let bottom = 0;
+            for (let y = 0; y < SCREEN_HEIGHT; y++) {
+                if (columnAlpha[y] > 0) {
+                    top = Math.min(top, y);
+                    bottom = Math.max(bottom, y);
+                }
+            }
+
+            if (top <= bottom) {
+                const height = bottom - top + 1;
+                const imageData = ctx.createImageData(1, height);
+                const data = imageData.data;
+                
+                for (let y = 0; y < height; y++) {
+                    const color = columnPixels[top + y];
+                    const offset = y * 4;
+                    data[offset] = (color >> 16) & 255;
+                    data[offset + 1] = (color >> 8) & 255;
+                    data[offset + 2] = color & 255;
+                    data[offset + 3] = 255;
+                }
+                ctx.putImageData(imageData, screenX, top);
+
+                for (let yPix = top; yPix < top + height; yPix++) {
+                    const pixelIndex = (yPix * SCREEN_WIDTH) + screenX;
+                    depthBuffer[pixelIndex] = columnDepth[top + yPix - top];
+                }
+            }
+        }
+
+        // Helper function to blend colors for fog effect
+        function blendColors(color1, color2, factor) {
+            const r1 = (color1 >> 16) & 255;
+            const g1 = (color1 >> 8) & 255;
+            const b1 = color1 & 255;
+            
+            const r2 = (color2 >> 16) & 255;
+            const g2 = (color2 >> 8) & 255;
+            const b2 = color2 & 255;
+            
+            const r = Math.round(r1 + (r2 - r1) * factor);
+            const g = Math.round(g1 + (g2 - g1) * factor);
+            const b = Math.round(b1 + (b2 - b1) * factor);
+            
+            return (r << 16) | (g << 8) | b;
+        }
+
+        // Add this helper function for color interpolation
+        function interpolateColors(c00, c10, c01, c11, fracX, fracY) {
+            const r00 = (c00 >> 16) & 0xFF;
+            const g00 = (c00 >> 8) & 0xFF;
+            const b00 = c00 & 0xFF;
+            
+            const r10 = (c10 >> 16) & 0xFF;
+            const g10 = (c10 >> 8) & 0xFF;
+            const b10 = c10 & 0xFF;
+            
+            const r01 = (c01 >> 16) & 0xFF;
+            const g01 = (c01 >> 8) & 0xFF;
+            const b01 = c01 & 0xFF;
+            
+            const r11 = (c11 >> 16) & 0xFF;
+            const g11 = (c11 >> 8) & 0xFF;
+            const b11 = c11 & 0xFF;
+            
+            const r = Math.floor(
+                r00 * (1 - fracX) * (1 - fracY) +
+                r10 * fracX * (1 - fracY) +
+                r01 * (1 - fracX) * fracY +
+                r11 * fracX * fracY
+            );
+            const g = Math.floor(
+                g00 * (1 - fracX) * (1 - fracY) +
+                g10 * fracX * (1 - fracY) +
+                g01 * (1 - fracX) * fracY +
+                g11 * fracX * fracY
+            );
+            const b = Math.floor(
+                b00 * (1 - fracX) * (1 - fracY) +
+                b10 * fracX * (1 - fracY) +
+                b01 * (1 - fracX) * fracY +
+                b11 * fracX * fracY
+            );
+            
+            return (r << 16) | (g << 8) | b;
+        }
+
+        // Main render function
+        function render() {
+            if (!gameStarted) return;
+            if (isGameOver) return;
+
+            updateCamera();
+            updateEnergyBar();
+            
+            // Clear the screen first
+            ctx.clearRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+            
+            // Create dramatic sky gradient
+            const gradient = ctx.createLinearGradient(0, 0, 0, SCREEN_HEIGHT);
+            
+            if (isNightTime) {
+                // Night sky with deep space colors
+                gradient.addColorStop(0, '#000033');   // Deep space blue
+                gradient.addColorStop(0.4, '#191970');  // Midnight blue
+                gradient.addColorStop(0.7, '#483D8B');  // Dark slate blue
+                gradient.addColorStop(1, '#4B0082');    // Indigo at horizon
+                
+                // Draw stars
+                if (!window.stars) {
+                    window.stars = Array(800).fill().map(() => ({
+                        x: Math.random() * SCREEN_WIDTH,
+                        y: Math.random() * SCREEN_HEIGHT * 0.7,
+                        size: 1 + Math.random() * 2,
+                        brightness: 0.7 + Math.random() * 0.3
+                    }));
+                }
+                
+                ctx.fillStyle = '#FFFFFF';
+                for (const star of window.stars) {
+                    const brightness = (Math.sin(Date.now() / 800 + star.x) + 1) * 0.5;
+                    ctx.globalAlpha = star.brightness * brightness;
+                    ctx.beginPath();
+                    ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            } else {
+                // Day sky with vibrant blue gradient
+                gradient.addColorStop(0, '#00BFFF');   // Deep sky blue
+                gradient.addColorStop(0.4, '#87CEEB');  // Sky blue
+                gradient.addColorStop(0.7, '#B0E0E6');  // Powder blue
+                gradient.addColorStop(1, '#F0F8FF');    // Alice blue at horizon
+            }
+            
+            // Draw sky gradient
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+            
+            // Render terrain with transparent tops
+            for (let x = 0; x < SCREEN_WIDTH; x++) {
+                const rayAngle = camera.angle + Math.atan((x - SCREEN_WIDTH/2) / SCREEN_WIDTH);
+                renderColumn(x, rayAngle);
+            }
+
+            /*
+            // After terrain rendering, add peak markers
+            [window.peak1, window.peak2].forEach((peak, index) => {
+                const dx = peak.x - camera.x;
+                const dy = peak.y - camera.y;
+                const objectAngle = Math.atan2(dy, dx); // angle from camera to object
+
+                let dAngle = objectAngle - camera.angle;
+                if (dAngle > Math.PI) dAngle -= 2*Math.PI;
+                if (dAngle < -Math.PI) dAngle += 2*Math.PI;
+
+                const screenX = SCREEN_WIDTH/2 + SCREEN_WIDTH * Math.tan(dAngle);
+                const distance = Math.sqrt(dx*dx + dy*dy);
+
+                const screenY = camera.horizon + ((camera.z - peak.z) / distance) * SCREEN_HEIGHT;
+
+                if (Math.cos(dAngle) > 0) {
+                    // Object is in front; draw at (screenX, screenY)
+                    ctx.fillStyle = 'yellow';
+                    ctx.beginPath();
+                    ctx.arc(screenX, screenY, 5, 0, 2*Math.PI);
+                    ctx.fill();
+                }
+            });
+            */
+
+            // render polygon
+            //drawPolygon(cubeVertices, cubeEdges);
+            //drawPolygonWithDepth(cubeVertices, cubeEdges);
+
+            // Draw minimap last (on top of everything)
+            drawMinimap();
+        }
+
+        // Handle input
+        const keysPressed = new Set();
+
+        document.addEventListener('mousemove', (e) => {
+            const centerX = window.innerWidth / 2;
+            const deltaX = (e.clientX - centerX) * 0.0002; // Adjust sensitivity as needed
+            camera.angle += deltaX;
+            lastMouseX = e.clientX;
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (!gameStarted || isGameOver) return;
+            
+            switch(e.code) {
+                case 'ArrowUp':
+                    speed = Math.min(MAX_SPEED, speed + ACCELERATION);
+                    break;
+                case 'ArrowDown':
+                    speed = Math.max(MIN_SPEED, speed - ACCELERATION);
+                    break;
+                case 'ArrowLeft':
+                    turnSpeed = Math.max(-MAX_TURN_SPEED, turnSpeed - TURN_ACCELERATION);
+                    break;
+                case 'ArrowRight':
+                    turnSpeed = Math.min(MAX_TURN_SPEED, turnSpeed + TURN_ACCELERATION);
+                    break;
+                case 'KeyA':
+                    verticalSpeed = Math.min(MAX_VERTICAL_SPEED, verticalSpeed + VERTICAL_ACCEL);
+                    break;
+                case 'KeyZ':
+                    verticalSpeed = Math.max(-MAX_VERTICAL_SPEED, verticalSpeed - VERTICAL_ACCEL);
+                    break;
+                case 'KeyX':
+                    // Keep existing debug code
+                    [window.peak1, window.peak2].forEach((peak, index) => {
+                        console.log(`Peak ${index + 1}:`, {
+                            worldPos: peak.worldPos,
+                            actualHeight: peak.actualHeight,
+                            screenPos: peak.screenPos,
+                            camera: { x: camera.x, y: camera.y, z: camera.z, angle: camera.angle },
+                            relative: { 
+                                dx: peak.x - camera.x, 
+                                dy: peak.y - camera.y, 
+                                dz: peak.z - camera.z 
+                            }
+                        });
+                    });
+                    break;
+                case 'KeyT':
+                    isNightTime = !isNightTime;
+                    break;
+                case 'Space':
+                    fireMissile();
+                    break;
+            }
+        });
+        
+        document.addEventListener('keyup', (e) => {
+            keysPressed.delete(e.code);
+        });
+
+        function updateCamera() {
+            if (isGameOver) return;  // Don't update if game is over
+
+            const oldX = camera.x;
+            const oldY = camera.y;
+            const oldZ = camera.z;
+
+            // Store current velocity components
+            const velocityX = Math.cos(camera.angle) * speed;
+            const velocityY = Math.sin(camera.angle) * speed;
+            const velocityZ = verticalSpeed;
+
+            // Apply forward movement
+            camera.x += Math.cos(camera.angle) * speed;
+            camera.y += Math.sin(camera.angle) * speed;
+            camera.z += verticalSpeed;
+
+            // Check for collision
+            const newHeight = getHeightAt(camera.x, camera.y);
+            const collisionBuffer = 10; // Minimum distance from terrain
+            
+            if (camera.z < newHeight + collisionBuffer) {
+                // Collision detected!
+                const currentTime = Date.now();
+                const totalVelocity = Math.sqrt(velocityX * velocityX + velocityY * velocityY + velocityZ * velocityZ);
+                
+                // Only apply damage if enough time has passed since last collision
+                if (currentTime - lastCollisionTime > COLLISION_COOLDOWN) {
+                    // Calculate damage based on speed
+                    const damage = totalVelocity * COLLISION_DAMAGE_FACTOR;
+                    energy = Math.max(0, energy - damage);
+                    lastCollisionTime = currentTime;
+                }
+
+                // Bounce effect
+                speed *= -BOUNCE_FACTOR;
+                verticalSpeed = Math.abs(verticalSpeed) * BOUNCE_FACTOR;
+                
+                // Move back to last safe position
+                camera.x = oldX;
+                camera.y = oldY;
+                camera.z = Math.max(newHeight + collisionBuffer, oldZ);
+                
+                // Reduce speed after collision
+                speed *= BOUNCE_FACTOR;
+            }
+
+            // Natural energy recovery when not damaged
+            if (Date.now() - lastCollisionTime > 1000) {
+                energy = Math.min(MAX_ENERGY, energy + RECOVERY_RATE);
+            }
+
+            // Apply turning
+            camera.angle += turnSpeed;
+
+            // Apply drag to all movements
+            speed *= DRAG;
+            verticalSpeed *= DRAG;
+            turnSpeed *= DRAG;
+
+            // Keep camera within bounds
+            camera.x = Math.max(0, Math.min(MAP_SIZE, camera.x));
+            camera.y = Math.max(0, Math.min(MAP_SIZE, camera.y));
+            camera.z = Math.max(50, Math.min(500, camera.z));
+
+            // Check for game over condition
+            if (energy <= 0 && !isGameOver) {
+                isGameOver = true;
+                gameOverStartTime = Date.now();
+                createGameOverScreen();
+            }
+        }
+
+        // Wrap camera position to create an infinite landscape
+        function wrapPosition(value, max) {
+            return (value + max) % max;
+        }
+
+        // Modify the game loop to include constant forward motion
+        function update() {
+            // Apply constant forward motion
+            camera.x = wrapPosition(camera.x + Math.cos(camera.angle) * speed, MAP_SIZE);
+            camera.y = wrapPosition(camera.y + Math.sin(camera.angle) * speed, MAP_SIZE);
+            
+             // Update missiles
+            updateMissiles();
+            // Update explosions
+            updateExplosions();
+            // Update enemies
+            updateEnemies();
+
+            render();
+            drawMissiles();
+            drawExplosions();
+            drawEnemies();
+            requestAnimationFrame(update);
+        }
+
+        // Add this function to draw the minimap
+        function drawMinimap() {
+            // Create or get minimap canvas
+            let minimapCanvas = document.getElementById('minimap');
+            if (!minimapCanvas) {
+                minimapCanvas = document.createElement('canvas');
+                minimapCanvas.id = 'minimap';
+                minimapCanvas.width = MINIMAP_SIZE;
+                minimapCanvas.height = MINIMAP_SIZE;
+                minimapCanvas.style.position = 'absolute';
+                minimapCanvas.style.top = '10px';
+                minimapCanvas.style.left = '10px';
+                minimapCanvas.style.border = '2px solid white';
+                minimapCanvas.style.borderRadius = '5px';
+                document.body.appendChild(minimapCanvas);
+            }
+            
+            const mctx = minimapCanvas.getContext('2d');
+            const imageData = mctx.createImageData(MINIMAP_SIZE, MINIMAP_SIZE);
+            
+            // Draw terrain
+            for (let y = 0; y < MINIMAP_SIZE; y++) {
+                for (let x = 0; x < MINIMAP_SIZE; x++) {
+                    const worldX = Math.floor(x * MINIMAP_SCALE);
+                    const worldY = Math.floor(y * MINIMAP_SCALE);
+                    const height = heightmap[worldY * MAP_SIZE + worldX];
+                    
+                    // Get color from heightmap
+                    let color;
+                    if (height < 50) {
+                        color = 0x000066;  // Deep water
+                    } else if (height < 60) {
+                        color = 0x000099;  // Shallow water
+                    } else if (height < 100) {
+                        color = 0x006633;  // Low ground
+                    } else if (height < 200) {
+                        color = 0x009933;  // Medium height
+                    } else {
+                        color = 0x666666;  // Mountains
+                    }
+                    
+                    const idx = (y * MINIMAP_SIZE + x) * 4;
+                    imageData.data[idx] = (color >> 16) & 255;     // R
+                    imageData.data[idx + 1] = (color >> 8) & 255;  // G
+                    imageData.data[idx + 2] = color & 255;         // B
+                    imageData.data[idx + 3] = 255;                 // A
+                }
+            }
+            
+            // Draw the minimap terrain
+            mctx.putImageData(imageData, 0, 0);
+            
+            // Draw player position
+            const playerX = camera.x / MINIMAP_SCALE;
+            const playerY = camera.y / MINIMAP_SCALE;
+            
+            // Draw view direction
+            const dirLength = 10;
+            const dirX = playerX + Math.cos(camera.angle) * dirLength;
+            const dirY = playerY + Math.sin(camera.angle) * dirLength;
+            
+            // Draw player marker
+            mctx.beginPath();
+            mctx.arc(playerX, playerY, 3, 0, Math.PI * 2);
+            mctx.fillStyle = 'yellow';
+            mctx.fill();
+            
+            // Draw direction line
+            mctx.beginPath();
+            mctx.moveTo(playerX, playerY);
+            mctx.lineTo(dirX, dirY);
+            mctx.strokeStyle = 'yellow';
+            mctx.lineWidth = 2;
+            mctx.stroke();
+
+            // Draw enemies on minimap
+            for (const enemy of enemies) {
+                const minimapX = enemy.x / MINIMAP_SCALE;
+                const minimapY = enemy.y / MINIMAP_SCALE;
+                
+                // Draw larger dot with border
+                mctx.beginPath();
+                mctx.arc(minimapX, minimapY, 4, 0, Math.PI * 2);  // Increased radius from 2 to 4
+                mctx.fillStyle = 'red';
+                mctx.fill();
+                mctx.strokeStyle = 'white';  // White border
+                mctx.lineWidth = 1;
+                mctx.stroke();
+            }
+        }
+
+        // Add this function after generateTerrain
+        function findStartingPosition() {
+            let bestX = MAP_SIZE/2;
+            let bestY = MAP_SIZE/2;
+            let bestHeight = Infinity;
+            let bestAngle = 0;
+            
+            const SAMPLE_STEP = 20;
+            const SEARCH_RADIUS = 200;
+            const centerX = MAP_SIZE/2;
+            const centerY = MAP_SIZE/2;
+            
+            // Find a good valley first
+            for (let y = centerY - SEARCH_RADIUS; y < centerY + SEARCH_RADIUS; y += SAMPLE_STEP) {
+                for (let x = centerX - SEARCH_RADIUS; x < centerX + SEARCH_RADIUS; x += SAMPLE_STEP) {
+                    if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) continue;
+                    
+                    const height = heightmap[Math.floor(y) * MAP_SIZE + Math.floor(x)];
+                    const surroundingHeight = getAverageSurroundingHeight(x, y, 30);
+                    
+                    if (height < surroundingHeight && height > 70 && height < bestHeight) {
+                        bestX = x;
+                        bestY = y;
+                        bestHeight = height;
+                    }
+                }
+            }
+            
+            // Find best viewing angle from this position
+            const NUM_ANGLES = 16;  // Check 16 different directions
+            let bestViewDistance = 0;
+            
+            for (let i = 0; i < NUM_ANGLES; i++) {
+                const angle = (i / NUM_ANGLES) * Math.PI * 2;
+                let viewDistance = 0;
+                let lastHeight = bestHeight;
+                
+                // Ray cast to check view distance
+                for (let dist = 50; dist < 300; dist += 10) {
+                    const checkX = bestX + Math.cos(angle) * dist;
+                    const checkY = bestY + Math.sin(angle) * dist;
+                    
+                    if (checkX < 0 || checkX >= MAP_SIZE || checkY < 0 || checkY >= MAP_SIZE) break;
+                    
+                    const heightAtPoint = heightmap[Math.floor(checkY) * MAP_SIZE + Math.floor(checkX)];
+                    
+                    // Check if terrain rises too steeply (would block view)
+                    const heightDifference = heightAtPoint - lastHeight;
+                    if (heightDifference > dist * 0.15) {  // 15% grade threshold
+                        break;
+                    }
+                    
+                    viewDistance = dist;
+                    lastHeight = heightAtPoint;
+                }
+                
+                // Update best angle if this view distance is better
+                if (viewDistance > bestViewDistance) {
+                    bestViewDistance = viewDistance;
+                    bestAngle = angle;
+                }
+            }
+            
+            // Set camera position and angle
+            camera.x = bestX;
+            camera.y = bestY;
+            camera.z = bestHeight + 30;
+            camera.angle = bestAngle;
+            
+            // Optional: Log the view distance for debugging
+            console.log(`Starting with view distance: ${bestViewDistance}`);
+        }
+
+        function getAverageSurroundingHeight(centerX, centerY, radius) {
+            let totalHeight = 0;
+            let count = 0;
+            
+            for (let y = centerY - radius; y < centerY + radius; y += 10) {
+                for (let x = centerX - radius; x < centerX + radius; x += 10) {
+                    if (x < 0 || x >= MAP_SIZE || y < 0 || y >= MAP_SIZE) continue;
+                    
+                    const height = heightmap[Math.floor(y) * MAP_SIZE + Math.floor(x)];
+                    totalHeight += height;
+                    count++;
+                }
+            }
+            
+            return totalHeight / count;
+        }
+
+        // Add this function to create enemies
+        function createEnemies() {
+            for (let i = 0; i < NUM_ENEMIES; i++) {
+                // Place enemies randomly but not too close to start position
+                let x, y;
+                do {
+                    x = Math.random() * MAP_SIZE;
+                    y = Math.random() * MAP_SIZE;
+                } while (distanceTo(x, y, camera.x, camera.y) < 300);  // Keep away from start
+
+                const height = getHeightAt(x, y);
+                
+                enemies.push({
+                    x: x,
+                    y: y,
+                    z: height + ENEMY_SIZE/2,  // Place on ground
+                    angle: Math.random() * Math.PI * 2,
+                    speed: ENEMY_SPEED,
+                    isPaused: false,  // Add pause state
+                    pauseTime: 0      // Track how long they've been paused
+                });
+            }
+        }
+
+        // Add these helper functions
+        function getHeightAt(x, y) {
+            const ix = Math.floor(x);
+            const iy = Math.floor(y);
+            if (ix < 0 || ix >= MAP_SIZE || iy < 0 || iy >= MAP_SIZE) return 0;
+            return heightmap[iy * MAP_SIZE + ix];
+        }
+
+        function distanceTo(x1, y1, x2, y2) {
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            return Math.sqrt(dx * dx + dy * dy);
+        }
+
+        // Add this function to update enemy positions
+        function updateEnemies() {
+            for (const enemy of enemies) {
+                // Handle pausing and resuming
+                if (!enemy.isPaused) {
+                    // Chance to pause
+                    if (Math.random() < PAUSE_CHANCE) {
+                        enemy.isPaused = true;
+                        enemy.pauseTime = 0;
+                        continue;
+                    }
+
+                    // Move forward in current direction
+                    const newX = enemy.x + Math.cos(enemy.angle) * enemy.speed;
+                    const newY = enemy.y + Math.sin(enemy.angle) * enemy.speed;
+                    
+                    // Check if new position is valid
+                    if (newX > 0 && newX < MAP_SIZE && newY > 0 && newY < MAP_SIZE) {
+                        enemy.x = newX;
+                        enemy.y = newY;
+                        enemy.z = getHeightAt(newX, newY) + ENEMY_SIZE/2;
+                    } else {
+                        // If hitting boundary, turn around
+                        enemy.angle += Math.PI + (Math.random() - 0.5);
+                    }
+                    
+                    // Occasionally change direction
+                    if (Math.random() < DIRECTION_CHANGE_CHANCE) {
+                        enemy.angle += (Math.random() - 0.5) * Math.PI/2;
+                    }
+                } else {
+                    // Handle paused state
+                    enemy.pauseTime++;
+                    
+                    // Chance to resume movement increases with pause time
+                    if (Math.random() < RESUME_CHANCE * (1 + enemy.pauseTime/100)) {
+                        enemy.isPaused = false;
+                    }
+                }
+            }
+        }
+
+        // Add this function to draw enemies
+        function drawEnemies() {
+            for (const enemy of enemies) {
+                const { vertices, edges } = createCube(enemy.x, enemy.y, enemy.z, ENEMY_SIZE);
+                drawPolygonWithDepth(vertices, edges, 2, [255, 0, 0, 255]);  // Red color
+            }
+        }
+
+        // Add energy bar to HTML
+        function createEnergyBar() {
+            let energyBar = document.getElementById('energyBar');
+            if (!energyBar) {
+                const container = document.createElement('div');
+                container.className = 'hud-element hud-container';
+                container.style.bottom = '20px';
+                container.style.left = '20px';
+                container.style.padding = '15px';
+                
+                const label = document.createElement('div');
+                label.textContent = 'ENERGY';
+                label.style.marginBottom = '5px';
+                label.style.fontSize = '14px';
+                label.style.letterSpacing = '2px';
+                
+                energyBar = document.createElement('div');
+                energyBar.id = 'energyBar';
+                energyBar.style.width = '200px';
+                energyBar.style.height = '20px';
+                energyBar.style.border = '2px solid rgba(0,255,255,0.5)';
+                energyBar.style.borderRadius = '10px';
+                energyBar.style.overflow = 'hidden';
+                energyBar.style.boxShadow = '0 0 10px rgba(0,255,255,0.3)';
+                
+                const fill = document.createElement('div');
+                fill.id = 'energyFill';
+                fill.style.width = '100%';
+                fill.style.height = '100%';
+                fill.style.backgroundColor = '#00ff00';
+                fill.style.transition = 'all 0.3s ease';
+                fill.style.boxShadow = 'inset 0 0 20px rgba(255,255,255,0.4)';
+                
+                energyBar.appendChild(fill);
+                container.appendChild(label);
+                container.appendChild(energyBar);
+                document.body.appendChild(container);
+            }
+        }
+
+        // Update energy bar display
+        function updateEnergyBar() {
+            const fill = document.getElementById('energyFill');
+            const container = fill.parentElement.parentElement;
+            const percentage = (energy / MAX_ENERGY) * 100;
+            
+            fill.style.width = `${percentage}%`;
+            
+            // Update color and effects based on energy level
+            if (percentage > 60) {
+                fill.style.backgroundColor = '#00ff00';
+                fill.style.boxShadow = 'inset 0 0 20px rgba(255,255,255,0.4)';
+                container.style.animation = '';
+            } else if (percentage > 30) {
+                fill.style.backgroundColor = '#ffff00';
+                fill.style.boxShadow = 'inset 0 0 20px rgba(255,255,0,0.4)';
+                container.style.animation = '';
+            } else {
+                fill.style.backgroundColor = '#ff0000';
+                fill.style.boxShadow = 'inset 0 0 20px rgba(255,0,0,0.4)';
+                container.style.animation = 'warningFlash 1s infinite';
+            }
+        }
+
+        function updateKillCounter() {
+            let container = document.getElementById('killCounterContainer');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'killCounterContainer';
+                container.className = 'hud-element hud-container';
+                container.style.top = '20px';
+                container.style.right = '20px';
+                
+                const killCounter = document.createElement('div');
+                killCounter.id = 'killCounter';
+                killCounter.style.fontSize = '20px';
+                killCounter.style.letterSpacing = '1px';
+                
+                container.appendChild(killCounter);
+                document.body.appendChild(container);
+            }
+            
+            const counter = document.getElementById('killCounter');
+            counter.textContent = `TARGETS DESTROYED: ${enemiesDestroyed}`;
+        }
+
+        function createCrosshair() {
+            const crosshair = document.createElement('div');
+            crosshair.className = 'hud-element';
+            crosshair.style.left = '50%';
+            crosshair.style.top = '50%';
+            crosshair.style.transform = 'translate(-50%, -50%)';
+            crosshair.style.width = '20px';
+            crosshair.style.height = '20px';
+            crosshair.style.border = '2px solid rgba(0,255,255,0.7)';
+            crosshair.style.borderRadius = '50%';
+            crosshair.style.animation = 'hudPulse 2s infinite';
+            
+            const centerDot = document.createElement('div');
+            centerDot.style.position = 'absolute';
+            centerDot.style.left = '50%';
+            centerDot.style.top = '50%';
+            centerDot.style.transform = 'translate(-50%, -50%)';
+            centerDot.style.width = '4px';
+            centerDot.style.height = '4px';
+            centerDot.style.backgroundColor = '#0ff';
+            centerDot.style.borderRadius = '50%';
+            
+            crosshair.appendChild(centerDot);
+            document.body.appendChild(crosshair);
+        }
+
+        // Add altitude indicator
+        function createAltitudeIndicator() {
+            const container = document.createElement('div');
+            container.className = 'hud-element hud-container';
+            container.style.left = '20px';
+            container.style.top = '50%';
+            container.style.transform = 'translateY(-50%)';
+            container.style.textAlign = 'center';
+            
+            const label = document.createElement('div');
+            label.textContent = 'ALT';
+            label.style.fontSize = '14px';
+            label.style.marginBottom = '5px';
+            
+            const value = document.createElement('div');
+            value.id = 'altitudeValue';
+            value.style.fontSize = '24px';
+            
+            container.appendChild(label);
+            container.appendChild(value);
+            document.body.appendChild(container);
+        }
+
+        // Update altitude display
+        function updateAltitude() {
+            const altValue = document.getElementById('altitudeValue');
+            if (altValue) {
+                altValue.textContent = Math.floor(camera.z).toString();
+            }
+        }
+
+        // Modify enemy destruction to increment counter
+        function destroyEnemy(enemy) {
+            spawnExplosion(enemy.x, enemy.y, enemy.z);
+            enemiesDestroyed++;
+            
+            // Optional: Spawn new enemy after delay
+            /*
+            setTimeout(() => {
+                if (enemies.length < NUM_ENEMIES) {
+                    let newEnemy = createEnemy();
+                    enemies.push(newEnemy);
+                }
+            }, 5000);  // 5 second delay
+            */
+        }
+
+        // Add game over screen creation
+        function createGameOverScreen() {
+            const gameOverDiv = document.createElement('div');
+            gameOverDiv.id = 'gameOverScreen';
+            gameOverDiv.style.position = 'fixed';
+            gameOverDiv.style.top = '0';
+            gameOverDiv.style.left = '0';
+            gameOverDiv.style.width = '100%';
+            gameOverDiv.style.height = '100%';
+            gameOverDiv.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+            gameOverDiv.style.display = 'flex';
+            gameOverDiv.style.flexDirection = 'column';
+            gameOverDiv.style.justifyContent = 'center';
+            gameOverDiv.style.alignItems = 'center';
+            gameOverDiv.style.opacity = '0';
+            gameOverDiv.style.transition = 'opacity 2s';
+            gameOverDiv.style.zIndex = '1000';
+            gameOverDiv.style.color = 'white';
+            gameOverDiv.style.fontFamily = 'Arial, sans-serif';
+
+            // Game Over text
+            const gameOverText = document.createElement('h1');
+            gameOverText.textContent = 'GAME OVER';
+            gameOverText.style.fontSize = '64px';
+            gameOverText.style.marginBottom = '20px';
+            gameOverText.style.textShadow = '0 0 10px red';
+
+            // Stats
+            const statsDiv = document.createElement('div');
+            statsDiv.style.fontSize = '24px';
+            statsDiv.style.marginBottom = '40px';
+            statsDiv.innerHTML = `Enemies Destroyed: ${enemiesDestroyed}`;
+
+            // Restart button
+            const restartButton = document.createElement('button');
+            restartButton.textContent = 'Restart Game';
+            restartButton.style.fontSize = '24px';
+            restartButton.style.padding = '15px 30px';
+            restartButton.style.backgroundColor = '#ff3333';
+            restartButton.style.border = 'none';
+            restartButton.style.borderRadius = '5px';
+            restartButton.style.color = 'white';
+            restartButton.style.cursor = 'pointer';
+            restartButton.style.transition = 'background-color 0.3s';
+
+            restartButton.onmouseover = () => {
+                restartButton.style.backgroundColor = '#ff6666';
+            };
+            restartButton.onmouseout = () => {
+                restartButton.style.backgroundColor = '#ff3333';
+            };
+            restartButton.onclick = restartGame;
+
+            gameOverDiv.appendChild(gameOverText);
+            gameOverDiv.appendChild(statsDiv);
+            gameOverDiv.appendChild(restartButton);
+            document.body.appendChild(gameOverDiv);
+
+            // Fade in the game over screen
+            setTimeout(() => {
+                gameOverDiv.style.opacity = '1';
+            }, 10);
+        }
+
+        // Add restart functionality
+        function restartGame() {
+            // Remove game over screen
+            const gameOverScreen = document.getElementById('gameOverScreen');
+            if (gameOverScreen) {
+                gameOverScreen.remove();
+            }
+
+            // Reset game state
+            isGameOver = false;
+            energy = MAX_ENERGY;
+            enemiesDestroyed = 0;
+            missiles = [];
+            explosions = [];
+            enemies = [];
+
+            // Reset camera and create new terrain
+            generateTerrain();
+            findStartingPosition();
+            createEnemies();
+        }
+
+        // Add start screen creation
+        function createStartScreen() {
+            const startDiv = document.createElement('div');
+            startDiv.id = 'startScreen';
+            startDiv.style.position = 'fixed';
+            startDiv.style.top = '0';
+            startDiv.style.left = '0';
+            startDiv.style.width = '100%';
+            startDiv.style.height = '100%';
+            startDiv.style.backgroundColor = 'rgba(0, 0, 0, 0.85)';
+            startDiv.style.display = 'flex';
+            startDiv.style.flexDirection = 'column';
+            startDiv.style.justifyContent = 'center';
+            startDiv.style.alignItems = 'center';
+            startDiv.style.color = 'white';
+            startDiv.style.fontFamily = "'Press Start 2P', 'Orbitron', Arial, sans-serif";
+            startDiv.style.zIndex = '1000';
+            startDiv.style.backgroundImage = 'linear-gradient(0deg, rgba(0,0,0,0.9) 0%, rgba(0,20,40,0.8) 100%)';
+
+            // Add Google Fonts
+            const fontLink = document.createElement('link');
+            fontLink.href = 'https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Press+Start+2P&display=swap';
+            fontLink.rel = 'stylesheet';
+            document.head.appendChild(fontLink);
+
+            // Title with glow effect
+            const title = document.createElement('h1');
+            title.textContent = 'HELICOPTER COMBAT';
+            title.style.fontSize = '52px';
+            title.style.marginBottom = '40px';
+            title.style.textAlign = 'center';
+            title.style.color = '#fff';
+            title.style.textShadow = `
+                0 0 10px #0ff,
+                0 0 20px #0ff,
+                0 0 30px #00f,
+                0 0 40px #00f
+            `;
+            title.style.animation = 'titlePulse 2s infinite';
+
+            // Add the animation
+            const style = document.createElement('style');
+            style.textContent = `
+                @keyframes titlePulse {
+                    0% { transform: scale(1); text-shadow: 0 0 10px #0ff, 0 0 20px #0ff, 0 0 30px #00f, 0 0 40px #00f; }
+                    50% { transform: scale(1.05); text-shadow: 0 0 15px #0ff, 0 0 25px #0ff, 0 0 35px #00f, 0 0 45px #00f; }
+                    100% { transform: scale(1); text-shadow: 0 0 10px #0ff, 0 0 20px #0ff, 0 0 30px #00f, 0 0 40px #00f; }
+                }
+                @keyframes buttonGlow {
+                    0% { box-shadow: 0 0 5px #0ff, 0 0 10px #0ff, 0 0 15px #00f; }
+                    50% { box-shadow: 0 0 10px #0ff, 0 0 20px #0ff, 0 0 30px #00f; }
+                    100% { box-shadow: 0 0 5px #0ff, 0 0 10px #0ff, 0 0 15px #00f; }
+                }
+            `;
+            document.head.appendChild(style);
+
+            // Controls panel with metallic look
+            const controls = document.createElement('div');
+            controls.style.fontSize = '20px';
+            controls.style.lineHeight = '1.8';
+            controls.style.padding = '30px 50px';
+            controls.style.marginBottom = '40px';
+            controls.style.background = 'linear-gradient(145deg, #1a1a1a, #2a2a2a)';
+            controls.style.borderRadius = '15px';
+            controls.style.boxShadow = '0 0 20px rgba(0,255,255,0.2)';
+            controls.style.border = '1px solid rgba(0,255,255,0.1)';
+            controls.innerHTML = `
+                <h2 style="margin-bottom: 20px; color: #0ff; text-align: center; font-size: 24px;">CONTROLS</h2>
+                <div style="display: grid; grid-template-columns: auto auto; gap: 20px; text-align: left;">
+                    <div>↑</div><div>Accelerate</div>
+                    <div>↓</div><div>Decelerate</div>
+                    <div>← →</div><div>Turn</div>
+                    <div>A</div><div>Rise</div>
+                    <div>Z</div><div>Descend</div>
+                    <div>SPACE</div><div>Fire Missile</div>
+                    <div>T</div><div>Toggle Day/Night</div>
+                </div>
+            `;
+
+            // Objective with futuristic styling
+            const objective = document.createElement('div');
+            objective.style.fontSize = '18px';
+            objective.style.marginBottom = '40px';
+            objective.style.maxWidth = '600px';
+            objective.style.textAlign = 'center';
+            objective.style.padding = '20px';
+            objective.style.background = 'rgba(0,255,255,0.1)';
+            objective.style.borderRadius = '10px';
+            objective.innerHTML = `
+                <h2 style="margin-bottom: 15px; color: #0ff;">MISSION BRIEFING</h2>
+                <p style="line-height: 1.6;">Destroy enemy targets while avoiding terrain collisions.<br>
+                Watch your energy level - crashes will damage your helicopter!</p>
+            `;
+
+            // Start button with hover effect
+            const startButton = document.createElement('button');
+            startButton.textContent = 'START MISSION';
+            startButton.style.fontSize = '24px';
+            startButton.style.padding = '20px 40px';
+            startButton.style.backgroundColor = 'rgba(0,255,255,0.1)';
+            startButton.style.border = '2px solid #0ff';
+            startButton.style.borderRadius = '10px';
+            startButton.style.color = '#0ff';
+            startButton.style.cursor = 'pointer';
+            startButton.style.transition = 'all 0.3s';
+            startButton.style.animation = 'buttonGlow 2s infinite';
+            startButton.style.fontFamily = "'Orbitron', sans-serif";
+            startButton.style.letterSpacing = '2px';
+
+            startButton.onmouseover = () => {
+                startButton.style.backgroundColor = 'rgba(0,255,255,0.3)';
+                startButton.style.transform = 'scale(1.1)';
+            };
+            startButton.onmouseout = () => {
+                startButton.style.backgroundColor = 'rgba(0,255,255,0.1)';
+                startButton.style.transform = 'scale(1)';
+            };
+            startButton.onclick = startGame;
+
+            startDiv.appendChild(title);
+            startDiv.appendChild(controls);
+            startDiv.appendChild(objective);
+            startDiv.appendChild(startButton);
+            document.body.appendChild(startDiv);
+        }
+
+        // Add start game function
+        function startGame() {
+            const startScreen = document.getElementById('startScreen');
+            if (startScreen) {
+                startScreen.style.opacity = '0';
+                setTimeout(() => {
+                    startScreen.remove();
+                }, 1000);
+            }
+            gameStarted = true;
+        }
+
+        // Modify your init function
+        function init() {
+            generateTerrain();
+            findStartingPosition();
+            createEnemies();
+            createEnergyBar();
+            createCrosshair();
+            createAltitudeIndicator();
+            createStartScreen();
+        }
+
+        // Modify your render loop to respect game state
+        function render() {
+            if (!gameStarted) return;
+            if (isGameOver) return;
+
+            updateCamera();
+            updateEnergyBar();
+            updateKillCounter();
+            updateAltitude();
+            
+            // Clear the screen first
+            ctx.clearRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+            
+            // Create dramatic sky gradient
+            const gradient = ctx.createLinearGradient(0, 0, 0, SCREEN_HEIGHT);
+            
+            if (isNightTime) {
+                // Night sky with deep space colors
+                gradient.addColorStop(0, '#000033');   // Deep space blue
+                gradient.addColorStop(0.4, '#191970');  // Midnight blue
+                gradient.addColorStop(0.7, '#483D8B');  // Dark slate blue
+                gradient.addColorStop(1, '#4B0082');    // Indigo at horizon
+                
+                // Draw stars
+                if (!window.stars) {
+                    window.stars = Array(800).fill().map(() => ({
+                        x: Math.random() * SCREEN_WIDTH,
+                        y: Math.random() * SCREEN_HEIGHT * 0.7,
+                        size: 1 + Math.random() * 2,
+                        brightness: 0.7 + Math.random() * 0.3
+                    }));
+                }
+                
+                ctx.fillStyle = '#FFFFFF';
+                for (const star of window.stars) {
+                    const brightness = (Math.sin(Date.now() / 800 + star.x) + 1) * 0.5;
+                    ctx.globalAlpha = star.brightness * brightness;
+                    ctx.beginPath();
+                    ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            } else {
+                // Day sky with vibrant blue gradient
+                gradient.addColorStop(0, '#00BFFF');   // Deep sky blue
+                gradient.addColorStop(0.4, '#87CEEB');  // Sky blue
+                gradient.addColorStop(0.7, '#B0E0E6');  // Powder blue
+                gradient.addColorStop(1, '#F0F8FF');    // Alice blue at horizon
+            }
+            
+            // Draw sky gradient
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
+            
+            // Render terrain with transparent tops
+            for (let x = 0; x < SCREEN_WIDTH; x++) {
+                const rayAngle = camera.angle + Math.atan((x - SCREEN_WIDTH/2) / SCREEN_WIDTH);
+                renderColumn(x, rayAngle);
+            }
+
+            /*
+            // After terrain rendering, add peak markers
+            [window.peak1, window.peak2].forEach((peak, index) => {
+                const dx = peak.x - camera.x;
+                const dy = peak.y - camera.y;
+                const objectAngle = Math.atan2(dy, dx); // angle from camera to object
+
+                let dAngle = objectAngle - camera.angle;
+                if (dAngle > Math.PI) dAngle -= 2*Math.PI;
+                if (dAngle < -Math.PI) dAngle += 2*Math.PI;
+
+                const screenX = SCREEN_WIDTH/2 + SCREEN_WIDTH * Math.tan(dAngle);
+                const distance = Math.sqrt(dx*dx + dy*dy);
+
+                const screenY = camera.horizon + ((camera.z - peak.z) / distance) * SCREEN_HEIGHT;
+
+                if (Math.cos(dAngle) > 0) {
+                    // Object is in front; draw at (screenX, screenY)
+                    ctx.fillStyle = 'yellow';
+                    ctx.beginPath();
+                    ctx.arc(screenX, screenY, 5, 0, 2*Math.PI);
+                    ctx.fill();
+                }
+            });
+            */
+
+            // render polygon
+            //drawPolygon(cubeVertices, cubeEdges);
+            //drawPolygonWithDepth(cubeVertices, cubeEdges);
+
+            // Draw minimap last (on top of everything)
+            drawMinimap();
+        }
+
+        // Add keyboard shortcut to start game
+        document.addEventListener('keydown', (e) => {
+            if (!gameStarted && e.code === 'Space') {
+                startGame();
+            }
+        });
+
+        // Initialize and start going
+        init();
+        update();
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>The Sentinel Clone</title>
+    <style>
+        body { margin: 0; }
+        canvas { display: block; }
+        #energy-display {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            color: white;
+            font-family: monospace;
+        }
+        #scan-indicator {
+            position: absolute;
+            top: 10px;
+            right: 150px;
+            width: 50px;
+            height: 50px;
+            border: 1px solid white;
+        }
+    </style>
+</head>
+<body>
+    <div id="energy-display">Energy: 10</div>
+    <div id="scan-indicator"></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        class SentinelGame {
+            constructor() {
+                this.scene = new THREE.Scene();
+                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                this.renderer = new THREE.WebGLRenderer();
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                document.body.appendChild(this.renderer.domElement);
+
+                // Initialize properties before any setup
+                this.terrain = null;
+                this.energy = 10;
+                this.objects = new Map();
+                this.raycaster = new THREE.Raycaster();
+                this.mouse = new THREE.Vector2();
+                this.rotationSpeed = 0.01;
+                this.isRotating = false;
+                this.verticalAngle = 0;
+                this.horizontalAngle = 0;
+                this.cursorFlashInterval = null;
+
+                // Add Sentinel properties
+                this.sentinel = null;
+                this.isBeingScanned = false;
+                this.scanTimer = null;
+                
+                // Setup in correct order
+                this.setupLighting();
+                this.createTerrain();
+                this.createSentinel();
+                this.setupControls();
+                
+                this.camera.position.set(0, 15, 15);
+                this.camera.lookAt(0, 0, 0);
+                
+                this.updateEnergyDisplay();
+                this.animate();
+            }
+
+            setupLighting() {
+                const ambientLight = new THREE.AmbientLight(0x404040, 1);
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+                directionalLight.position.set(10, 20, 10);
+                this.scene.add(ambientLight);
+                this.scene.add(directionalLight);
+            }
+
+            createTerrain() {
+                // Create a larger, more detailed terrain
+                const size = 50;
+                const segments = 50;
+                const geometry = new THREE.BufferGeometry();
+                const material = new THREE.MeshPhongMaterial({
+                    color: 0x44aa44,
+                    wireframe: false,
+                    flatShading: true
+                });
+                
+                // Create vertices for a grid
+                const vertices = [];
+                const indices = [];
+                
+                // Generate height map
+                const heightMap = [];
+                for (let z = 0; z <= segments; z++) {
+                    heightMap[z] = [];
+                    for (let x = 0; x <= segments; x++) {
+                        let height = 0;
+                        
+                        if (Math.random() < 0.1) {
+                            height = (Math.random() < 0.5 ? 1 : -1) * Math.random() * 6;
+                        } else {
+                            height = Math.random() * 2 - 1;
+                        }
+                        
+                        if (Math.random() < 0.05) {
+                            height = Math.round(height * 2) / 2 * 2;
+                        }
+                        
+                        heightMap[z][x] = height;
+                    }
+                }
+                
+                // Smooth the height map
+                for (let iterations = 0; iterations < 3; iterations++) {
+                    for (let z = 1; z < segments; z++) {
+                        for (let x = 1; x < segments; x++) {
+                            const avg = (
+                                heightMap[z-1][x] + 
+                                heightMap[z+1][x] + 
+                                heightMap[z][x-1] + 
+                                heightMap[z][x+1]
+                            ) / 4;
+                            heightMap[z][x] = (heightMap[z][x] + avg * 2) / 3;
+                        }
+                    }
+                }
+                
+                // Create vertices and triangles
+                for (let z = 0; z <= segments; z++) {
+                    for (let x = 0; x <= segments; x++) {
+                        const xPos = (x / segments - 0.5) * size;
+                        const zPos = (z / segments - 0.5) * size;
+                        const yPos = heightMap[z][x] * 3;
+                        
+                        vertices.push(xPos, yPos, zPos);
+                        
+                        // Create triangles (two per grid cell)
+                        if (x < segments && z < segments) {
+                            const topLeft = z * (segments + 1) + x;
+                            const topRight = topLeft + 1;
+                            const bottomLeft = (z + 1) * (segments + 1) + x;
+                            const bottomRight = bottomLeft + 1;
+                            
+                            indices.push(topLeft, bottomLeft, topRight);
+                            indices.push(bottomLeft, bottomRight, topRight);
+                        }
+                    }
+                }
+                
+                geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+                geometry.setIndex(indices);
+                geometry.computeVertexNormals();
+                
+                const terrain = new THREE.Mesh(geometry, material);
+                
+                // Add side walls
+                const sideGeometry = new THREE.BoxGeometry(size, 20, size);
+                const sideMaterial = new THREE.MeshPhongMaterial({ 
+                    color: 0x2d5a27,
+                    flatShading: true
+                });
+                const sideWalls = new THREE.Mesh(sideGeometry, sideMaterial);
+                sideWalls.position.y = -10;
+                
+                const terrainGroup = new THREE.Group();
+                terrainGroup.add(terrain);
+                terrainGroup.add(sideWalls);
+                
+                this.terrain = terrain;
+                this.scene.add(terrainGroup);
+                
+                // Add initial trees
+                for (let i = 0; i < 20; i++) {
+                    const x = (Math.random() - 0.5) * size * 0.8;
+                    const z = (Math.random() - 0.5) * size * 0.8;
+                    const position = new THREE.Vector3(x, 0, z);
+                    
+                    const raycaster = new THREE.Raycaster();
+                    raycaster.set(
+                        new THREE.Vector3(x, 10, z),
+                        new THREE.Vector3(0, -1, 0)
+                    );
+                    const intersects = raycaster.intersectObject(terrain);
+                    
+                    if (intersects.length > 0) {
+                        position.y = intersects[0].point.y;
+                        this.createObject('tree', position);
+                    }
+                }
+            }
+
+            createSentinel() {
+                // Find highest point in terrain
+                const terrainGeometry = this.terrain.geometry;
+                const positions = terrainGeometry.attributes.position.array;
+                let highestY = -Infinity;
+                let highestPoint = new THREE.Vector3();
+                
+                for (let i = 0; i < positions.length; i += 3) {
+                    const y = positions[i + 1];
+                    if (y > highestY) {
+                        highestY = y;
+                        highestPoint.set(
+                            positions[i],     // x
+                            y + 2,           // y (slightly above terrain)
+                            positions[i + 2]  // z
+                        );
+                    }
+                }
+
+                // Create Sentinel mesh
+                const geometry = new THREE.ConeGeometry(1, 4, 8);
+                const material = new THREE.MeshPhongMaterial({ 
+                    color: 0xFF0000,
+                    emissive: 0x600000 // Add slight glow
+                });
+                this.sentinel = new THREE.Mesh(geometry, material);
+                
+                // Position Sentinel on highest point
+                this.sentinel.position.copy(highestPoint);
+                this.sentinel.userData.rotationSpeed = 0.005;
+                this.sentinel.userData.type = 'sentinel';
+                
+                // Add glowing eyes (spotlights)
+                const spotLight1 = new THREE.SpotLight(0xFF0000, 2);
+                spotLight1.angle = 0.2;
+                spotLight1.penumbra = 0.1;
+                spotLight1.distance = 50;
+                
+                const spotLight2 = spotLight1.clone();
+                
+                // Position lights as eyes
+                spotLight1.position.set(-0.3, 3, 0);
+                spotLight2.position.set(0.3, 3, 0);
+                
+                this.sentinel.add(spotLight1);
+                this.sentinel.add(spotLight2);
+                
+                this.scene.add(this.sentinel);
+            }
+
+            setupControls() {
+                // Mouse movement controls
+                document.addEventListener('mousemove', (e) => {
+                    // Update mouse position for raycasting
+                    this.mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+                    this.mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+                    
+                    const margin = 100;
+                    const w = window.innerWidth;
+                    const h = window.innerHeight;
+                    
+                    // Calculate rotation triggers
+                    const rotateLeft = e.clientX < margin;
+                    const rotateRight = e.clientX > w - margin;
+                    const rotateUp = e.clientY < margin;
+                    const rotateDown = e.clientY > h - margin;
+                    
+                    this.isRotating = rotateLeft || rotateRight || rotateUp || rotateDown;
+                    
+                    // Handle cursor flashing
+                    if (this.isRotating) {
+                        if (!this.cursorFlashInterval) {
+                            this.cursorFlashInterval = setInterval(() => {
+                                document.body.style.cursor = 
+                                    document.body.style.cursor === 'none' ? 'default' : 'none';
+                            }, 100);
+                        }
+                    } else {
+                        if (this.cursorFlashInterval) {
+                            clearInterval(this.cursorFlashInterval);
+                            this.cursorFlashInterval = null;
+                            document.body.style.cursor = 'default';
+                        }
+                    }
+                    
+                    // Store rotation directions
+                    this.rotationDirections = {
+                        horizontal: rotateLeft ? -1 : (rotateRight ? 1 : 0),
+                        vertical: rotateUp ? -1 : (rotateDown ? 1 : 0)
+                    };
+                });
+
+                // Click to absorb
+                document.addEventListener('click', (e) => {
+                    if (e.button === 0) { // Left click
+                        this.raycaster.setFromCamera(this.mouse, this.camera);
+                        const intersects = this.raycaster.intersectObjects(Array.from(this.objects.values()));
+                        if (intersects.length > 0) {
+                            const object = intersects[0].object;
+                            this.absorbObject(object);
+                        }
+                    } else if (e.button === 2) { // Right click
+                        this.transferToSynthoid();
+                    }
+                });
+
+                // Prevent context menu on right click
+                document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+                // Creation controls
+                document.addEventListener('keydown', (e) => {
+                    if (e.key.toLowerCase() === 'u') {
+                        this.horizontalAngle += Math.PI;
+                    } else {
+                        this.handleCreationKey(e.key.toLowerCase());
+                    }
+                });
+            }
+
+            handleCreationKey(key) {
+                if (!['t', 'b', 'r'].includes(key)) return;
+                
+                // Debug check
+                console.log("Terrain when creating:", this.terrain);
+                
+                if (!this.terrain) {
+                    console.error("Terrain is not initialized!");
+                    return;
+                }
+                
+                this.raycaster.setFromCamera(this.mouse, this.camera);
+                const intersects = this.raycaster.intersectObject(this.terrain);
+                
+                if (intersects.length > 0) {
+                    const position = intersects[0].point;
+                    let cost = key === 't' ? 1 : (key === 'b' ? 2 : 3);
+                    
+                    if (this.energy >= cost) {
+                        const type = key === 't' ? 'tree' : (key === 'b' ? 'boulder' : 'synthoid');
+                        this.createObject(type, position);
+                        this.energy -= cost;
+                        this.updateEnergyDisplay();
+                    }
+                }
+            }
+
+            absorbObject(object) {
+                this.energy += object.userData.energyValue;
+                this.updateEnergyDisplay();
+                this.scene.remove(object);
+                this.objects.delete(object.id);
+            }
+
+            transferToSynthoid() {
+                this.raycaster.setFromCamera(this.mouse, this.camera);
+                const intersects = this.raycaster.intersectObjects(Array.from(this.objects.values()));
+                
+                if (intersects.length > 0) {
+                    const object = intersects[0].object;
+                    if (object.userData.type === 'synthoid') {
+                        // Move camera to new synthoid position
+                        const newPos = object.position.clone();
+                        newPos.y += 2; // Eye level
+                        this.camera.position.copy(newPos);
+                        
+                        // Flash screen blue (temporary visual feedback)
+                        document.body.style.backgroundColor = '#0000FF';
+                        setTimeout(() => {
+                            document.body.style.backgroundColor = '#000000';
+                        }, 200);
+                    }
+                }
+            }
+
+            updateCamera() {
+                // Apply horizontal rotation
+                if (this.rotationDirections?.horizontal) {
+                    this.horizontalAngle += this.rotationSpeed * this.rotationDirections.horizontal;
+                }
+                
+                // Apply vertical rotation with limits
+                if (this.rotationDirections?.vertical) {
+                    this.verticalAngle += this.rotationSpeed * this.rotationDirections.vertical;
+                    // Limit vertical angle to slightly less than ±90 degrees
+                    this.verticalAngle = Math.max(Math.min(this.verticalAngle, Math.PI/2 - 0.1), -Math.PI/2 + 0.1);
+                }
+                
+                // Calculate camera position
+                const radius = Math.sqrt(Math.pow(this.camera.position.x, 2) + Math.pow(this.camera.position.z, 2));
+                this.camera.position.x = radius * Math.sin(this.horizontalAngle);
+                this.camera.position.z = radius * Math.cos(this.horizontalAngle);
+                this.camera.position.y = 15 * Math.cos(this.verticalAngle);
+                
+                // Make camera look at origin
+                this.camera.lookAt(0, 0, 0);
+            }
+
+            updateSentinel() {
+                if (!this.sentinel) return;
+                
+                // Rotate Sentinel
+                this.sentinel.rotation.y += this.sentinel.userData.rotationSpeed;
+                
+                // Check if Sentinel can see any objects
+                const direction = new THREE.Vector3();
+                this.sentinel.getWorldDirection(direction);
+                
+                const raycaster = new THREE.Raycaster(
+                    this.sentinel.position,
+                    direction,
+                    0,
+                    50 // Sentinel view distance
+                );
+                
+                // First check terrain intersection
+                const terrainIntersects = raycaster.intersectObject(this.terrain);
+                const terrainDistance = terrainIntersects.length > 0 ? 
+                    terrainIntersects[0].distance : Infinity;
+                
+                // Then check objects, but only if they're closer than terrain
+                const objects = Array.from(this.objects.values());
+                const intersects = raycaster.intersectObjects(objects);
+                
+                // Reset scan state
+                let newScanState = false;
+                
+                if (intersects.length > 0 && intersects[0].distance < terrainDistance) {
+                    const visibleObject = intersects[0].object;
+                    if (visibleObject.userData.type === 'synthoid' || 
+                        visibleObject.userData.type === 'boulder') {
+                        newScanState = true;
+                        console.log("Sentinel spotted:", visibleObject.userData.type); // Debug log
+                    }
+                }
+                
+                // Update scan indicator
+                if (newScanState !== this.isBeingScanned) {
+                    this.isBeingScanned = newScanState;
+                    this.updateScanIndicator();
+                    
+                    // Update Sentinel's eyes
+                    this.sentinel.children.forEach(light => {
+                        if (light.isLight) {
+                            light.intensity = newScanState ? 5 : 2;
+                        }
+                    });
+                    
+                    // Debug log
+                    console.log("Scan state changed to:", newScanState);
+                }
+            }
+
+            updateScanIndicator() {
+                const indicator = document.getElementById('scan-indicator');
+                if (this.isBeingScanned) {
+                    // Create static effect
+                    indicator.style.backgroundColor = '#FFFFFF';
+                    this.scanStaticEffect(indicator);
+                    
+                    // Start energy drain if not already scanning
+                    if (!this.scanTimer) {
+                        this.startEnergyDrain();
+                    }
+                } else {
+                    indicator.style.backgroundColor = 'transparent';
+                    if (this.staticEffect) {
+                        clearInterval(this.staticEffect);
+                        this.staticEffect = null;
+                    }
+                    if (this.scanTimer) {
+                        clearInterval(this.scanTimer);
+                        this.scanTimer = null;
+                    }
+                }
+            }
+
+            scanStaticEffect(indicator) {
+                if (this.staticEffect) {
+                    clearInterval(this.staticEffect);
+                }
+                
+                this.staticEffect = setInterval(() => {
+                    const noise = Math.random() > 0.5 ? '#FFFFFF' : '#FF0000';
+                    indicator.style.backgroundColor = noise;
+                }, 50);
+            }
+
+            startEnergyDrain() {
+                if (this.scanTimer) return;
+                
+                this.scanTimer = setInterval(() => {
+                    this.energy--;
+                    this.updateEnergyDisplay();
+                    console.log("Energy drained! Current energy:", this.energy); // Debug log
+                    
+                    if (this.energy <= 0) {
+                        alert('Game Over - The Sentinel has drained all your energy!');
+                        location.reload();
+                    }
+                }, 1000);
+            }
+
+            animate() {
+                requestAnimationFrame(() => this.animate());
+                this.updateCamera();
+                this.updateSentinel();
+                this.renderer.render(this.scene, this.camera);
+            }
+
+            updateEnergyDisplay() {
+                document.getElementById('energy-display').textContent = `Energy: ${this.energy}`;
+            }
+
+            createObject(type, position) {
+                let geometry, material, object;
+                
+                switch(type) {
+                    case 'tree':
+                        geometry = new THREE.CylinderGeometry(0, 0.5, 2, 8);
+                        material = new THREE.MeshPhongMaterial({ color: 0x228B22 });
+                        object = new THREE.Mesh(geometry, material);
+                        object.userData.energyValue = 1;
+                        break;
+                        
+                    case 'boulder':
+                        geometry = new THREE.BoxGeometry(1, 1, 1);
+                        material = new THREE.MeshPhongMaterial({ color: 0x808080 });
+                        object = new THREE.Mesh(geometry, material);
+                        object.userData.energyValue = 2;
+                        break;
+                        
+                    case 'synthoid':
+                        geometry = new THREE.ConeGeometry(0.5, 2, 8);
+                        material = new THREE.MeshPhongMaterial({ color: 0xFFD700 });
+                        object = new THREE.Mesh(geometry, material);
+                        object.userData.energyValue = 3;
+                        break;
+                }
+                
+                object.position.copy(position);
+                object.userData.type = type;
+                this.scene.add(object);
+                this.objects.set(object.id, object);
+                return object;
+            }
+        }
+
+        // Start the game
+        const game = new SentinelGame();
+    </script>
+</body>
+</html>

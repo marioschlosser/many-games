@@ -1,239 +1,436 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <title>Pseudo-3D Racing Game</title>
+    <title>Pole Position Clone</title>
     <style>
-        /* CSS styling for the canvas */
-        body {
-            margin: 0;
-            overflow: hidden;
-            background: #000;
+        body { margin: 0; }
+        canvas { display: block; }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: monospace;
         }
-        #gameCanvas {
-            display: block;
-            margin: 0 auto;
-            background: #555;
+        #camera-info {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            color: white;
+            font-family: monospace;
+            text-align: right;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
         }
     </style>
 </head>
 <body>
-    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    <div id="info"></div>
+    <div id="camera-info"></div>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
-    <script>
-        // JavaScript code for the game
+        class PolePosition {
+            constructor() {
+                this.scene = new THREE.Scene();
+                this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+                this.renderer = new THREE.WebGLRenderer();
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                document.body.appendChild(this.renderer.domElement);
 
-        // Get the canvas and context
-        const canvas = document.getElementById('gameCanvas');
-        const ctx = canvas.getContext('2d');
+                // Game state
+                this.playerCar = null;
+                this.speed = 0;
+                this.gear = 'LO';
+                this.steering = 0;
+                this.carRotation = 0;  // Current rotation of the car
+                this.velocity = new THREE.Vector3();  // Car's velocity vector
+                this.acceleration = 0;
+                this.maxTurnAngle = Math.PI / 3;  // Maximum turning angle
+                this.turnSpeed = 0.03;  // How quickly the car can turn
+                this.friction = 0.98;  // Friction coefficient
 
-        // Game settings
-        const roadWidth = 2000;
-        const segmentLength = 200;
-        const rumbleLength = 3;
-        const maxSpeed = segmentLength / 16 * 500;
-        const accel = maxSpeed / 5;
-        const braking = -maxSpeed;
-        const decel = -maxSpeed / 5;
-        const cameraDepth = 0.84; // Adjusted for better perspective
+                // Camera control state
+                this.cameraOffset = new THREE.Vector3(0, 2, 7);  // Initial offset
+                this.cameraTilt = 0;  // Initial tilt angle
+                this.cameraSpeed = 0.5;  // Speed of camera movement
+                this.tiltSpeed = 0.02;  // Speed of camera tilt
 
-        // Player car
-        const player = {
-            x: 0,
-            z: 0,
-            speed: 0
-        };
+                this.init();
+                this.setupControls();
+                this.animate();
+            }
 
-        // Key controls
-        const keys = {
-            left: false,
-            right: false,
-            up: false,
-            down: false
-        };
+            init() {
+                // Add sky color and fog for depth
+                this.scene.background = new THREE.Color(0x87CEEB);
+                this.scene.fog = new THREE.Fog(0x87CEEB, 50, 150);
 
-        // Event listeners for keypresses
-        document.addEventListener('keydown', (e) => {
-            if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = true;
-            if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = true;
-            if (e.code === 'ArrowUp' || e.code === 'KeyW') keys.up = true;
-            if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.down = true;
-        });
+                // Enhanced lighting
+                const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+                this.scene.add(ambientLight);
 
-        document.addEventListener('keyup', (e) => {
-            if (e.code === 'ArrowLeft' || e.code === 'KeyA') keys.left = false;
-            if (e.code === 'ArrowRight' || e.code === 'KeyD') keys.right = false;
-            if (e.code === 'ArrowUp' || e.code === 'KeyW') keys.up = false;
-            if (e.code === 'ArrowDown' || e.code === 'KeyS') keys.down = false;
-        });
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(100, 100, 50);
+                directionalLight.castShadow = true;
+                this.scene.add(directionalLight);
 
-        // Road segments
-        const segments = [];
-        let position = 0;
+                // Enable shadows
+                this.renderer.shadowMap.enabled = true;
+                this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-        function initRoad() {
-            for (let i = 0; i < 500; i++) {
-                segments.push({
-                    index: i,
-                    p1: { world: { y: 0, z: i * segmentLength }, camera: {}, screen: {} },
-                    p2: { world: { y: 0, z: (i + 1) * segmentLength }, camera: {}, screen: {} },
-                    curve: Math.sin(i * 0.02) * 3, // Increased amplitude and adjusted frequency for bigger turns
-                    color: (Math.floor(i / rumbleLength) % 2) ? 'darkgray' : 'gray'
+                // Load textures
+                const textureLoader = new THREE.TextureLoader();
+                const grassTexture = textureLoader.load('https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/terrain/grasslight-big.jpg');
+                const asphaltTexture = textureLoader.load('https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/terrain/grasslight-big.jpg');
+                const stripeTexture = textureLoader.load('https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/textures/terrain/grasslight-big.jpg');
+
+                // Configure texture repeats
+                grassTexture.wrapS = grassTexture.wrapT = THREE.RepeatWrapping;
+                grassTexture.repeat.set(50, 50);
+                asphaltTexture.wrapS = asphaltTexture.wrapT = THREE.RepeatWrapping;
+                asphaltTexture.repeat.set(2, 100);
+
+                // Add textured ground plane
+                const groundGeometry = new THREE.PlaneGeometry(1000, 1000);
+                const groundMaterial = new THREE.MeshStandardMaterial({ 
+                    map: grassTexture,
+                    roughness: 0.8,
+                    metalness: 0.2,
+                    side: THREE.DoubleSide 
                 });
-            }
-        }
+                const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+                ground.rotation.x = -Math.PI / 2;
+                ground.position.y = -0.1;
+                ground.receiveShadow = true;
+                this.scene.add(ground);
 
-        function update(dt) {
-            // Update player speed
-            if (keys.up) {
-                player.speed += accel * dt;
-            } else if (keys.down) {
-                player.speed += braking * dt;
-            } else {
-                player.speed += decel * dt;
-            }
+                // Define enhanced materials
+                const trackMaterial = new THREE.MeshStandardMaterial({ 
+                    map: asphaltTexture,
+                    roughness: 0.7,
+                    metalness: 0.1,
+                    side: THREE.DoubleSide,
+                });
 
-            // Limit speed
-            player.speed = Math.max(0, Math.min(player.speed, maxSpeed));
+                const borderMaterial = new THREE.MeshStandardMaterial({ 
+                    color: 0xFFFFFF,
+                    roughness: 0.4,
+                    metalness: 0.6,
+                    emissive: 0x666666,
+                    emissiveIntensity: 0.2
+                });
 
-            // Get current road segment
-            const currentSegment = findSegment(position);
-            
-            // Handle steering
-            let steerAmount = 0;
-            if (keys.left) {
-                steerAmount = -1.5;
-            } else if (keys.right) {
-                steerAmount = 1.5;
-            }
+                // Create track using curve points (back to flat ground)
+                const trackPoints = [
+                    new THREE.Vector3(0, 0, 20),       // Start line
+                    new THREE.Vector3(0, 0, -100),     // First straight
+                    new THREE.Vector3(30, 0, -150),    // First right turn
+                    new THREE.Vector3(20, 0, -200),    // Short left
+                    new THREE.Vector3(40, 0, -250),    // Second right
+                    new THREE.Vector3(-40, 0, -300),   // Hairpin left
+                    new THREE.Vector3(-20, 0, -400),   // Long right turn
+                    new THREE.Vector3(0, 0, -500),     // Final straight
+                    new THREE.Vector3(0, 0, -600)      // Finish line
+                ];
 
-            // Update player's x position based on steering
-            // Note: player.x is no longer automatically following the road curve
-            player.x += (steerAmount * dt * player.speed / maxSpeed);
+                const curve = new THREE.CatmullRomCurve3(trackPoints);
+                const points = curve.getPoints(200);
+                
+                // Create track geometry (simplified back to flat)
+                const trackWidth = 20;
+                const trackGeometry = new THREE.BufferGeometry();
+                const vertices = [];
+                const indices = [];
 
-            // Calculate how far off the road center the player is
-            const roadCurveOffset = currentSegment.curve * (player.speed / maxSpeed);
-            player.x += roadCurveOffset * dt; // Apply road physics force
+                // Create track vertices (flat version)
+                for (let i = 0; i < points.length - 1; i++) {
+                    const current = points[i];
+                    const next = points[i + 1];
+                    const direction = next.clone().sub(current).normalize();
+                    const side = direction.clone().cross(new THREE.Vector3(0, 1, 0)).normalize();
 
-            // Check if player is off the road
-            if (Math.abs(player.x) > 1.2) { // Allow slight overflow before slowing
-                // Slow down when off the road
-                player.speed *= 0.9;
-            }
+                    vertices.push(
+                        current.x + side.x * trackWidth/2, 0, current.z + side.z * trackWidth/2,
+                        current.x - side.x * trackWidth/2, 0, current.z - side.z * trackWidth/2
+                    );
 
-            // Move player forward
-            position += player.speed * dt;
-            let trackLength = segments.length * segmentLength;
-            if (position >= trackLength) {
-                position -= trackLength;
-            } else if (position < 0) {
-                position += trackLength;
-            }
-        }
-
-        function project(p, cameraX, cameraY, cameraZ, cameraDepth) {
-            p.camera.x = p.world.x - cameraX;
-            p.camera.y = p.world.y - cameraY;
-            p.camera.z = p.world.z - cameraZ;
-
-            p.screen.scale = cameraDepth / p.camera.z;
-            p.screen.x = Math.round((canvas.width / 2) + (p.screen.scale * p.camera.x * canvas.width / 2));
-            p.screen.y = Math.round((canvas.height / 2) - (p.screen.scale * p.camera.y * canvas.height / 2));
-            p.screen.w = Math.round(p.screen.scale * roadWidth * canvas.width / 2);
-        }
-
-        function render() {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-            let baseSegment = findSegment(position);
-            let baseIndex = baseSegment.index;
-            let basePercent = (position % segmentLength) / segmentLength;
-
-            let maxY = canvas.height;
-
-            let x = 0;
-            let dx = -(baseSegment.curve * basePercent);
-
-            // Draw road segments from the base segment
-            for (let n = 0; n < 300; n++) {
-                let segment = segments[(baseIndex + n) % segments.length];
-                segment.looped = segment.index < baseIndex;
-                segment.fog = exponentialFog(n / 300);
-
-                segment.clip = maxY;
-
-                project(segment.p1, player.x * roadWidth / 2, 1500, position, cameraDepth);
-                project(segment.p2, player.x * roadWidth / 2, 1500, position, cameraDepth);
-
-                x += dx;
-                dx += segment.curve;
-
-                segment.p1.world.x = x;
-                segment.p2.world.x = x + dx;
-
-                if (segment.p2.camera.z <= cameraDepth || segment.p2.screen.y >= segment.p1.screen.y || segment.p1.screen.y >= maxY) {
-                    continue;
+                    if (i < points.length - 2) {
+                        const baseIndex = i * 2;
+                        indices.push(
+                            baseIndex, baseIndex + 1, baseIndex + 2,
+                            baseIndex + 1, baseIndex + 3, baseIndex + 2
+                        );
+                    }
                 }
 
-                drawSegment(
-                    segment.p1.screen.x,
-                    segment.p1.screen.y,
-                    segment.p1.screen.w,
-                    segment.p2.screen.x,
-                    segment.p2.screen.y,
-                    segment.p2.screen.w,
-                    segment.color
+                trackGeometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+                trackGeometry.setIndex(indices);
+                trackGeometry.computeVertexNormals();
+
+                // Add support pillars for elevated sections
+                for (let i = 0; i < points.length; i += 10) {
+                    if (points[i].y > 0.5) {  // Only add pillars for elevated sections
+                        const pillarGeometry = new THREE.BoxGeometry(2, points[i].y * 2, 2);
+                        const pillarMaterial = new THREE.MeshBasicMaterial({ color: 0x888888 });
+                        const pillar = new THREE.Mesh(pillarGeometry, pillarMaterial);
+                        pillar.position.set(points[i].x, points[i].y / 2, points[i].z);
+                        this.scene.add(pillar);
+                    }
+                }
+
+                // Update physics in the update method
+                this.gravity = -0.001;  // Add gravity constant
+                this.groundLevel = 0;   // Reference for ground level
+
+                // Update track material to be more visible
+                const trackMesh = new THREE.Mesh(trackGeometry, trackMaterial);
+                this.scene.add(trackMesh);
+
+                // Add track borders
+                const borderGeometry = new THREE.BoxGeometry(0.5, 0.5, 1);
+                
+                for (let i = 0; i < points.length - 1; i += 4) {
+                    const current = points[i];
+                    const next = points[i + 1];
+                    const direction = next.clone().sub(current).normalize();
+                    const side = direction.clone().cross(new THREE.Vector3(0, 1, 0)).normalize();
+
+                    // Left border
+                    const leftBorder = new THREE.Mesh(borderGeometry, borderMaterial);
+                    leftBorder.position.set(
+                        current.x + side.x * (trackWidth/2 + 0.25),
+                        0.25,
+                        current.z + side.z * (trackWidth/2 + 0.25)
+                    );
+                    this.scene.add(leftBorder);
+
+                    // Right border
+                    const rightBorder = new THREE.Mesh(borderGeometry, borderMaterial);
+                    rightBorder.position.set(
+                        current.x - side.x * (trackWidth/2 + 0.25),
+                        0.25,
+                        current.z - side.z * (trackWidth/2 + 0.25)
+                    );
+                    this.scene.add(rightBorder);
+                }
+
+                // Add trees and scenery
+                const treeGeometry = new THREE.ConeGeometry(2, 8, 8);
+                const treeMaterial = new THREE.MeshStandardMaterial({ color: 0x2d5a27 });
+                const trunkGeometry = new THREE.CylinderGeometry(0.5, 0.5, 2);
+                const trunkMaterial = new THREE.MeshStandardMaterial({ color: 0x4a2f21 });
+
+                for (let i = 0; i < 100; i++) {
+                    const tree = new THREE.Group();
+                    
+                    const crown = new THREE.Mesh(treeGeometry, treeMaterial);
+                    crown.position.y = 5;
+                    crown.castShadow = true;
+                    tree.add(crown);
+                    
+                    const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
+                    trunk.position.y = 1;
+                    trunk.castShadow = true;
+                    tree.add(trunk);
+
+                    // Random position away from track
+                    const angle = Math.random() * Math.PI * 2;
+                    const radius = 30 + Math.random() * 50;
+                    tree.position.x = Math.cos(angle) * radius;
+                    tree.position.z = Math.sin(angle) * radius - 300;
+                    this.scene.add(tree);
+                }
+
+                // Create enhanced car with details
+                const carBody = new THREE.Group();
+                
+                // Main body
+                const bodyGeometry = new THREE.BoxGeometry(1.8, 0.5, 4);
+                const bodyMaterial = new THREE.MeshStandardMaterial({ 
+                    color: 0xff0000,
+                    roughness: 0.2,
+                    metalness: 0.8
+                });
+                const mainBody = new THREE.Mesh(bodyGeometry, bodyMaterial);
+                mainBody.castShadow = true;
+                carBody.add(mainBody);
+
+                // Cockpit
+                const cockpitGeometry = new THREE.BoxGeometry(1.4, 0.4, 1.5);
+                const cockpitMaterial = new THREE.MeshStandardMaterial({
+                    color: 0x222222,
+                    roughness: 0.1,
+                    metalness: 0.9
+                });
+                const cockpit = new THREE.Mesh(cockpitGeometry, cockpitMaterial);
+                cockpit.position.y = 0.45;
+                cockpit.position.z = -0.5;
+                cockpit.castShadow = true;
+                carBody.add(cockpit);
+
+                // Wheels
+                const wheelGeometry = new THREE.CylinderGeometry(0.3, 0.3, 0.2, 16);
+                const wheelMaterial = new THREE.MeshStandardMaterial({ 
+                    color: 0x222222,
+                    roughness: 0.8,
+                    metalness: 0.1
+                });
+
+                const wheelPositions = [
+                    [-0.9, -0.2, -1.2],
+                    [0.9, -0.2, -1.2],
+                    [-0.9, -0.2, 1.2],
+                    [0.9, -0.2, 1.2]
+                ];
+
+                wheelPositions.forEach(position => {
+                    const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
+                    wheel.rotation.z = Math.PI / 2;
+                    wheel.position.set(...position);
+                    wheel.castShadow = true;
+                    carBody.add(wheel);
+                });
+
+                this.playerCar = carBody;
+                this.playerCar.position.set(0, 0.3, 0);
+                this.scene.add(this.playerCar);
+
+                // Camera setup
+                this.camera.position.set(0, 2, 7);
+                this.camera.lookAt(new THREE.Vector3(0, 0, -10));
+            }
+
+            setupControls() {
+                document.addEventListener('keydown', (e) => {
+                    switch(e.key) {
+                        case 'ArrowLeft':
+                            this.steering = 1;
+                            break;
+                        case 'ArrowRight':
+                            this.steering = -1;
+                            break;
+                        case 'ArrowUp':
+                            this.gear = 'HI';
+                            break;
+                        case 'ArrowDown':
+                            this.gear = 'LO';
+                            break;
+                        case ' ':
+                            this.speed *= 0.9; // Basic brake implementation
+                            break;
+                        case 'w':  // Move camera up
+                            this.cameraOffset.y += this.cameraSpeed;
+                            break;
+                        case 's':  // Move camera down
+                            this.cameraOffset.y -= this.cameraSpeed;
+                            break;
+                        case 'a':  // Move camera left
+                            this.cameraOffset.x -= this.cameraSpeed;
+                            break;
+                        case 'd':  // Move camera right
+                            this.cameraOffset.x += this.cameraSpeed;
+                            break;
+                        case 'q':  // Move camera forward
+                            this.cameraOffset.z -= this.cameraSpeed;
+                            break;
+                        case 'e':  // Move camera backward
+                            this.cameraOffset.z += this.cameraSpeed;
+                            break;
+                        case 'r':  // Tilt camera up
+                            this.cameraTilt += this.tiltSpeed;
+                            break;
+                        case 'f':  // Tilt camera down
+                            this.cameraTilt -= this.tiltSpeed;
+                            break;
+                    }
+                });
+
+                document.addEventListener('keyup', (e) => {
+                    if (['ArrowLeft', 'ArrowRight'].includes(e.key)) {
+                        this.steering = 0;
+                    }
+                });
+            }
+
+            update() {
+                // Calculate acceleration based on gear
+                const maxSpeed = this.gear === 'HI' ? 0.5 : 0.3;
+                this.acceleration = (maxSpeed - this.speed) * 0.02;
+                this.speed = Math.min(this.speed + this.acceleration, maxSpeed);
+
+                // Apply friction
+                this.speed *= this.friction;
+
+                // Update car rotation based on steering and speed
+                if (this.speed > 0.01) {
+                    const turnAmount = this.steering * this.turnSpeed * this.speed;
+                    this.carRotation -= turnAmount;
+                }
+
+                // Update velocity vector based on car's rotation
+                this.velocity.x = Math.sin(this.carRotation) * this.speed;
+                this.velocity.z = -Math.cos(this.carRotation) * this.speed;
+
+                // Update car position and rotation
+                this.playerCar.position.add(this.velocity);
+                this.playerCar.rotation.y = -this.carRotation;
+
+                // Update camera position and target with custom offset and tilt
+                const lookAheadDistance = 15;
+                
+                // Position camera with offset
+                this.camera.position.x = this.playerCar.position.x - Math.sin(this.carRotation) * this.cameraOffset.z + this.cameraOffset.x;
+                this.camera.position.z = this.playerCar.position.z + Math.cos(this.carRotation) * this.cameraOffset.z;
+                this.camera.position.y = this.playerCar.position.y + this.cameraOffset.y;
+
+                // Calculate look-at point with tilt
+                const lookAtPoint = new THREE.Vector3(
+                    this.playerCar.position.x + Math.sin(this.carRotation) * lookAheadDistance,
+                    this.playerCar.position.y + 1 + (this.cameraTilt * 10),  // Amplified tilt effect
+                    this.playerCar.position.z - Math.cos(this.carRotation) * lookAheadDistance
                 );
+                this.camera.lookAt(lookAtPoint);
 
-                maxY = segment.p1.screen.y;
+                // Update camera info display
+                document.getElementById('camera-info').innerHTML = `
+                    Camera Settings:
+                    <br>X: ${this.cameraOffset.x.toFixed(2)} (A/D)
+                    <br>Y: ${this.cameraOffset.y.toFixed(2)} (W/S)
+                    <br>Z: ${this.cameraOffset.z.toFixed(2)} (Q/E)
+                    <br>Tilt: ${this.cameraTilt.toFixed(2)} (R/F)
+                    <br>
+                    <br>Controls:
+                    <br>W/S - Up/Down
+                    <br>A/D - Left/Right
+                    <br>Q/E - Forward/Back
+                    <br>R/F - Tilt Up/Down
+                `;
+
+                // Keep the original game info on the left
+                document.getElementById('info').textContent = 
+                    `Gear: ${this.gear} | Speed: ${(this.speed * 100).toFixed(0)}`;
             }
 
-            // Draw player car
-            drawPlayer();
-        }
-
-        function drawSegment(x1, y1, w1, x2, y2, w2, color) {
-            ctx.fillStyle = color;
-            ctx.beginPath();
-            ctx.moveTo(x1 - w1, y1);
-            ctx.lineTo(x2 - w2, y2);
-            ctx.lineTo(x2 + w2, y2);
-            ctx.lineTo(x1 + w1, y1);
-            ctx.closePath();
-            ctx.fill();
-        }
-
-        function drawPlayer() {
-            const carWidth = 50;
-            const carHeight = 100;
-
-            ctx.fillStyle = 'red';
-            ctx.fillRect((canvas.width / 2) - (carWidth / 2), canvas.height - carHeight - 20, carWidth, carHeight);
-        }
-
-        function findSegment(z) {
-            return segments[Math.floor(z / segmentLength) % segments.length];
-        }
-
-        function exponentialFog(distance) {
-            const fogDensity = 5;
-            return 1 / Math.exp(distance * fogDensity);
-        }
-
-        let lastTime = null;
-
-        function frame(time) {
-            if (lastTime !== null) {
-                const dt = (time - lastTime) / 1000;
-                update(dt);
-                render();
+            animate() {
+                requestAnimationFrame(() => this.animate());
+                this.update();
+                this.renderer.render(this.scene, this.camera);
             }
-            lastTime = time;
-            requestAnimationFrame(frame);
         }
 
-        initRoad();
-        requestAnimationFrame(frame);
+        // Start game
+        new PolePosition();
     </script>
 </body>
 </html>
