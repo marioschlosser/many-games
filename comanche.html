@@ -249,7 +249,7 @@
                     
                     if (distance < EXPLOSION_DAMAGE_RADIUS) {
                         // Enemy caught in explosion
-                        spawnExplosion(enemy.x, enemy.y, enemy.z);  // Secondary explosion
+                        destroyEnemy(enemy);
                         enemies.splice(j, 1);
                     }
                 }
