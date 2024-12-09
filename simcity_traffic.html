@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>City Traffic Simulator</title>
+    <style>
+        canvas {
+            border: 1px solid black;
+        }
+        .controls {
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="controls">
+        <button onclick="setTool(0)">Grass</button>
+        <button onclick="setTool(1)">Road</button>
+        <button onclick="setTool(2)">Residential</button>
+        <button onclick="setTool(3)">Factory</button>
+        <button onclick="simulateTraffic()">Simulate Traffic</button>
+    </div>
+    <canvas id="cityCanvas" width="400" height="400"></canvas>
+
+    <script>
+        const CELL_SIZE = 30;
+        const GRID_SIZE = 25;
+        const canvas = document.getElementById('cityCanvas');
+        canvas.width = GRID_SIZE * CELL_SIZE;
+        canvas.height = GRID_SIZE * CELL_SIZE;
+        const ctx = canvas.getContext('2d');
+
+        // Initialize data structures
+        let currentTool = 0;
+        let network_map = Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill(0));
+        
+        // Original layout data
+        const originalLayout = [
+            [0,0,0,0,0,0,0,0,0,0],
+            [0,0,0,0,2,0,0,0,0,0],
+            [0,1,1,1,1,1,0,0,0,0],
+            [0,1,0,0,0,1,0,0,0,0],
+            [0,1,0,0,0,1,0,0,0,0],
+            [0,1,1,1,1,1,1,1,1,0],
+            [0,1,0,0,0,1,0,0,1,0],
+            [0,1,0,0,0,1,0,0,1,3],
+            [0,1,1,1,1,1,1,1,1,0],
+            [0,0,0,0,0,0,0,0,0,0]
+        ];
+
+        // Copy original layout into the larger map
+        for (let y = 0; y < originalLayout.length; y++) {
+            for (let x = 0; x < originalLayout[0].length; x++) {
+                network_map[y][x] = originalLayout[y][x];
+            }
+        }
+
+        let residential_buildings = [[1,4]];
+        let factories = [[7,9]];
+        let traffic_map = Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill(0));
+
+        // Colors for different cell types
+        const colors = {
+            0: '#90EE90', // Grass (light green)
+            1: '#808080', // Road (gray)
+            2: '#FFB6C1', // Residential (pink)
+            3: '#CD853F'  // Factory (brown)
+        };
+
+        function setTool(tool) {
+            currentTool = tool;
+        }
+
+        // Add this after other initialization code
+        let animationFrame;
+        let startTime = Date.now();
+
+        function drawGrid() {
+            const currentTime = Date.now();
+            const timeOffset = (currentTime - startTime) / 1000;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.lineWidth = 0.5;
+            ctx.strokeStyle = '#ccc';
+            
+            for (let y = 0; y < GRID_SIZE; y++) {
+                for (let x = 0; x < GRID_SIZE; x++) {
+                    // Base color from cell type
+                    ctx.fillStyle = colors[network_map[y][x]];
+                    ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                    
+                    // Add animated traffic overlay
+                    if (traffic_map[y][x] > 0) {
+                        // Create pulsing effect based on traffic value
+                        const pulseSpeed = Math.min(traffic_map[y][x] * 2, 4);
+                        const pulseIntensity = 0.3 + 0.2 * Math.sin(timeOffset * pulseSpeed);
+                        const baseIntensity = Math.min(traffic_map[y][x] / 2, 0.5);
+                        const alpha = baseIntensity + pulseIntensity;
+                        
+                        // Calculate color based on traffic intensity
+                        // Green (low) -> Yellow (medium) -> Red (high)
+                        const value = Math.min(traffic_map[y][x], 2.0) / 2.0; // Normalize to 0-1 range
+                        let r, g, b;
+                        if (value < 0.5) {
+                            // Green to Yellow
+                            r = Math.floor(255 * (2 * value));
+                            g = 255;
+                            b = 0;
+                        } else {
+                            // Yellow to Red
+                            r = 255;
+                            g = Math.floor(255 * (2 * (1 - value)));
+                            b = 0;
+                        }
+                        
+                        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${alpha})`;
+                        ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                        
+                        // Add traffic value text
+                        ctx.fillStyle = 'black';
+                        ctx.font = '10px Arial';
+                        ctx.textAlign = 'center';
+                        ctx.textBaseline = 'middle';
+                        ctx.fillText(
+                            traffic_map[y][x].toFixed(1),
+                            x * CELL_SIZE + CELL_SIZE/2,
+                            y * CELL_SIZE + CELL_SIZE/2
+                        );
+                    }
+                    
+                    ctx.strokeRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                }
+            }
+            
+            animationFrame = requestAnimationFrame(drawGrid);
+        }
+
+        // Add cleanup for animation when needed
+        function stopAnimation() {
+            if (animationFrame) {
+                cancelAnimationFrame(animationFrame);
+            }
+        }
+
+        // Start animation when page loads
+        drawGrid();
+
+        function updateCell(x, y, value) {
+            // Remove old coordinates from lists if necessary
+            if (network_map[y][x] === 2) {
+                residential_buildings = residential_buildings.filter(coord => 
+                    coord[0] !== y || coord[1] !== x);
+            } else if (network_map[y][x] === 3) {
+                factories = factories.filter(coord => 
+                    coord[0] !== y || coord[1] !== x);
+            }
+
+            // Update the cell
+            network_map[y][x] = value;
+
+            // Add new coordinates to lists if necessary
+            if (value === 2) {
+                residential_buildings.push([y, x]);
+            } else if (value === 3) {
+                factories.push([y, x]);
+            }
+        }
+
+        // Add these constants and functions after the existing code but before the simulateTraffic function
+        const MAX_PATH = 15;  // Maximum path length to prevent infinite loops
+
+        function getBranches(tileX, tileY) {
+            const branches = [];
+            const directions = [[0,1], [0,-1], [1,0], [-1,0]];
+            
+            for (const [dx, dy] of directions) {
+                const nx = tileX + dx;
+                const ny = tileY + dy;
+                if (nx >= 0 && nx < GRID_SIZE && 
+                    ny >= 0 && ny < GRID_SIZE && 
+                    network_map[nx][ny] === 1) {
+                    branches.push([nx, ny]);
+                }
+            }
+            return branches;
+        }
+
+        function checkForGoal(tileX, tileY) {
+            const directions = [[0,1], [0,-1], [1,0], [-1,0]];
+            
+            for (const [dx, dy] of directions) {
+                const nx = tileX + dx;
+                const ny = tileY + dy;
+                if (nx >= 0 && nx < GRID_SIZE && 
+                    ny >= 0 && ny < GRID_SIZE && 
+                    network_map[nx][ny] === 3) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        function arraysEqual(a, b) {
+            return a[0] === b[0] && a[1] === b[1];
+        }
+
+        function exploreTile(tile, previousTile, totalPathLength, nodeDistances, sourceTile, sinkTileType, isAvoidDetours) {
+            // End the path if we have reached the maximum distance
+            let isPathEnd = totalPathLength > MAX_PATH;
+
+            // Get all branches
+            const branches = getBranches(tile[0], tile[1]);
+
+            // Nodes are tiles with more than two roads, or the tile where we started
+            const isNode = (branches.length > 2) || arraysEqual(tile, sourceTile);
+
+            // Check if this is a node
+            if (isNode) {
+                const tileKey = tile.toString();
+                
+                if (tileKey in nodeDistances) {
+                    // If we found a shorter path to this node, update; otherwise, consider detours
+                    if (totalPathLength < nodeDistances[tileKey]) {
+                        nodeDistances[tileKey] = totalPathLength;
+                    } else {
+                        // Only consider ending early if we avoid detours
+                        if (isAvoidDetours) {
+                            isPathEnd = true;
+                        }
+                    }
+                } else {
+                    // First time at this node
+                    nodeDistances[tileKey] = totalPathLength;
+                }
+            }
+
+            // Check if this tile has a goal tile nearby
+            const hasGoal = checkForGoal(tile[0], tile[1]);
+
+            // If path limit reached, it is also the path end
+            isPathEnd = isPathEnd || (totalPathLength > MAX_PATH);
+
+            // Only continue if this isn't the end of the path
+            if (isPathEnd) {
+                return [];
+            }
+
+            const newPaths = [];
+            let numberOfNewBranches = 0;
+
+            // Go through all branching tiles
+            for (const branch of branches) {
+                // Don't go where we came from
+                if (!previousTile || !arraysEqual(branch, previousTile)) {
+                    // Descend into a new path segment
+                    // The Python code always uses sink_tile_type = 3 in recursive calls
+                    const newPath = exploreTile(
+                        branch, 
+                        tile, 
+                        totalPathLength + 1, 
+                        nodeDistances, 
+                        sourceTile, 
+                        3, 
+                        isAvoidDetours
+                    );
+
+                    if (newPath.length > 0) {
+                        newPaths.push(newPath);
+                        numberOfNewBranches++;
+                    }
+                }
+            }
+
+            let paths = [];
+
+            // If we have an ongoing path OR we are at the goal, prepend the current tile to the path
+            if (newPaths.length > 0 || hasGoal) {
+                if (isNode) {
+                    // For nodes: paths = [current_tile, [list_of_new_paths]]
+                    paths = [tile, newPaths];
+                } else {
+                    // For regular tiles: if we have subpaths, pick the first; otherwise just the current tile
+                    if (newPaths.length > 0) {
+                        paths = [tile].concat(newPaths[0]);
+                    } else {
+                        paths = [tile];
+                    }
+                }
+            }
+
+            return paths;
+        }
+
+        // This function replicates the Python generate_traffic logic:
+        // If the first element is a list => node scenario (multiple paths branching)
+        // Otherwise => path scenario
+        function generateTraffic(map, paths, incomingTraffic) {
+            if (!paths || paths.length === 0) {
+                return;
+            }
+
+            // In Python:
+            // if isinstance(paths[0], type([])): # meaning it's a list, so a node scenario
+            // else: # a path scenario
+
+            // Check if paths[0] itself is an array of arrays (node scenario)
+            if (Array.isArray(paths[0]) && Array.isArray(paths[0][0])) {
+                // Node scenario: distribute traffic evenly among subpaths
+                const trafficPerPath = incomingTraffic / paths.length;
+                for (const path of paths) {
+                    generateTraffic(map, path, trafficPerPath);
+                }
+            } else {
+                // Path scenario
+                for (const tile of paths) {
+                    if (Array.isArray(tile) && Array.isArray(tile[0])) {
+                        // Found a node or branching structure down the line
+                        generateTraffic(map, tile, incomingTraffic);
+                    } else {
+                        // Tile scenario: tile is [x,y]
+                        map[tile[0]][tile[1]] += incomingTraffic;
+                    }
+                }
+            }
+        }
+
+
+        function findAdjacentRoads(y, x) {
+            const roads = [];
+            const directions = [[0,1], [0,-1], [1,0], [-1,0]];
+            
+            for (const [dy, dx] of directions) {
+                const ny = y + dy;
+                const nx = x + dx;
+                if (nx >= 0 && nx < GRID_SIZE && 
+                    ny >= 0 && ny < GRID_SIZE && 
+                    network_map[ny][nx] === 1) {  // Check for road
+                    roads.push([ny, nx]);
+                }
+            }
+            return roads;
+        }
+
+        function simulateTraffic() {
+            // Reset traffic map
+            traffic_map = Array(GRID_SIZE).fill().map(() => Array(GRID_SIZE).fill(0));
+            
+            // For each residential building
+            for (const [resY, resX] of residential_buildings) {
+                // Find adjacent road tiles
+                const startRoads = findAdjacentRoads(resY, resX);
+                
+                // For each adjacent road tile
+                for (const roadTile of startRoads) {
+                    const nodeDistances = {};
+                    const paths = exploreTile(
+                        roadTile,      // starting from road tile
+                        null,          // no previous tile
+                        0,             // initial path length
+                        nodeDistances, // empty node distances
+                        roadTile,      // source tile is the road
+                        3,             // looking for factories (type 3)
+                        false           // avoid detours
+                    );
+                    
+                    // Generate traffic for the paths found
+                    if (paths.length > 0) {
+                        generateTraffic(traffic_map, paths, 1.0); // Start with traffic value of 1.0
+                    }
+                }
+            }
+            
+            // Redraw the grid to show traffic
+            drawGrid();
+        }
+
+        // Add these variables after other initialization code
+        let isMouseDown = false;
+
+        // Replace the existing canvas click handler with these event listeners
+        canvas.addEventListener('mousedown', (event) => {
+            isMouseDown = true;
+            handleCanvasClick(event);
+        });
+
+        canvas.addEventListener('mousemove', (event) => {
+            if (isMouseDown) {
+                handleCanvasClick(event);
+            }
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            isMouseDown = false;
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+            isMouseDown = false;
+        });
+
+        function handleCanvasClick(event) {
+            const rect = canvas.getBoundingClientRect();
+            const x = Math.floor((event.clientX - rect.left) / CELL_SIZE);
+            const y = Math.floor((event.clientY - rect.top) / CELL_SIZE);
+            
+            if (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE) {
+                updateCell(x, y, currentTool);
+                drawGrid();
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Marble Runner</title>
+    <style>
+        body { margin: 0; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // Core game variables
+        let scene, camera, renderer;
+        let marble, track;
+        let isGameOver = false;
+        
+        // Physics variables
+        let marbleVelocity = new THREE.Vector3();
+        let gravity = 0.0025;
+        let speed = 0.05;
+        
+        // Track variables
+        let trackSegments = [];
+        let trackPoints = [];
+        let trackCurve;
+        let trackChunks = [];
+        let banking = 0;
+        const POINTS_PER_CHUNK = 5;
+        const VISIBLE_CHUNKS = 3;
+        let lastChunkEnd = null;
+        let chunkIndex = 0;
+        let buildings = [];
+        const BUILDING_COUNT = 30;
+        
+        function init() {
+            // Setup scene
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+            
+            // Create marble (player)
+            const marbleGeometry = new THREE.SphereGeometry(0.5);
+            const marbleMaterial = new THREE.MeshPhongMaterial({ color: 0x00ff00 });
+            marble = new THREE.Mesh(marbleGeometry, marbleMaterial);
+            scene.add(marble);
+            
+            // Create basic track
+            createTrack();
+            createBuildings();
+            
+            // Add lighting
+            const light = new THREE.PointLight(0xffffff, 1, 100);
+            light.position.set(0, 10, 0);
+            scene.add(light);
+            const ambientLight = new THREE.AmbientLight(0x404040);
+            scene.add(ambientLight);
+            
+            // Position camera and marble
+            marble.position.set(0, 1, 0);
+            camera.position.set(0, 2, 5);
+            
+            // Add event listeners
+            document.addEventListener('keydown', handleKeyDown);
+            
+            // Start game loop
+            animate();
+        }
+        
+        function createTrack() {
+            // Generate curve points for the track
+            trackPoints = [
+                new THREE.Vector3(0, 0, 0),
+                new THREE.Vector3(2, 1, -10),
+                new THREE.Vector3(5, 3, -20),
+                new THREE.Vector3(3, 0, -30),
+                new THREE.Vector3(-2, -2, -40),
+                new THREE.Vector3(-5, 0, -50)
+            ];
+            
+            trackCurve = new THREE.CatmullRomCurve3(trackPoints);
+            
+            // Create track segments along the curve
+            const segments = 50;
+            const trackWidth = 5;
+            
+            for (let i = 0; i < segments; i++) {
+                const t1 = i / segments;
+                const t2 = (i + 1) / segments;
+                
+                const pos1 = trackCurve.getPoint(t1);
+                const pos2 = trackCurve.getPoint(t2);
+                
+                // Calculate segment orientation
+                const tangent = trackCurve.getTangent(t1);
+                const normal = new THREE.Vector3(0, 1, 0);
+                const binormal = new THREE.Vector3().crossVectors(tangent, normal);
+                
+                // Create track segment geometry
+                const segmentGeometry = new THREE.PlaneGeometry(trackWidth, 1);
+                const segmentMaterial = new THREE.MeshPhongMaterial({ 
+                    color: 0x808080,
+                    side: THREE.DoubleSide 
+                });
+                
+                const segment = new THREE.Mesh(segmentGeometry, segmentMaterial);
+                
+                // Position and orient segment
+                segment.position.copy(pos1);
+                segment.lookAt(pos2);
+                segment.rotateX(-Math.PI / 2);
+                
+                trackSegments.push(segment);
+                scene.add(segment);
+            }
+        }
+        
+        function createBuildings() {
+            for (let i = 0; i < BUILDING_COUNT; i++) {
+                // Random building dimensions
+                const width = 2 + Math.random() * 4;
+                const height = 5 + Math.random() * 15;
+                const depth = 2 + Math.random() * 4;
+                
+                const geometry = new THREE.BoxGeometry(width, height, depth);
+                const material = new THREE.MeshPhongMaterial({
+                    color: 0x808080 + Math.random() * 0x404040
+                });
+                
+                const building = new THREE.Mesh(geometry, material);
+                
+                // Position buildings along track
+                const t = i / BUILDING_COUNT;
+                const trackPoint = trackCurve.getPoint(t);
+                const tangent = trackCurve.getTangent(t);
+                const normal = new THREE.Vector3(0, 1, 0);
+                const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+                
+                // Use binormal to place buildings perpendicular to track
+                // Alternate between left and right side of track
+                const side = Math.random() < 0.5 ? 1 : -1;
+                const distance = 8 + Math.random() * 5; // Distance from track center
+                
+                building.position.copy(trackPoint);
+                building.position.add(binormal.multiplyScalar(side * distance));
+                building.position.y += height / 2; // Move up so building sits on ground
+                
+                buildings.push(building);
+                scene.add(building);
+            }
+        }
+        
+        function handleKeyDown(event) {
+            switch(event.key) {
+                case 'ArrowLeft':
+                    marbleVelocity.x -= 0.05;
+                    break;
+                case 'ArrowRight':
+                    marbleVelocity.x += 0.05;
+                    break;
+            }
+        }
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            if (!isGameOver) {
+                // Add safety check for track
+                if (trackCurve && trackPoints.length > 0) {
+                    updateTrack();
+                    updateMarble();
+                    updateCamera();
+                } else {
+                    isGameOver = true;
+                }
+            }
+            
+            renderer.render(scene, camera);
+        }
+        
+        function updateMarble() {
+            // Add safety check at the start
+            if (!trackCurve || trackPoints.length === 0) {
+                isGameOver = true;
+                return;
+            }
+
+            // Find closest point on curve to marble
+            const marblePos = marble.position.clone();
+            let closestT;
+            try {
+                closestT = trackCurve.getUtoTmapping(
+                    trackCurve.getPointAt(0).distanceTo(marblePos) / 100
+                );
+            } catch (e) {
+                console.log("Track mapping error:", e);
+                isGameOver = true;
+                return;
+            }
+            
+            // Safety check for valid track position
+            if (closestT === undefined || closestT < 0 || closestT > 1) {
+                console.log("Invalid track position:", closestT);
+                isGameOver = true;
+                return;
+            }
+            
+            // Get track direction at current position
+            const tangent = trackCurve.getTangent(closestT);
+            const normal = new THREE.Vector3(0, 1, 0);
+            const binormal = new THREE.Vector3().crossVectors(tangent, normal).normalize();
+            
+            // Apply banking based on curve
+            banking = -tangent.x * 0.5;
+            
+            // Update marble physics
+            marbleVelocity.add(new THREE.Vector3(0, -gravity, 0));
+            marbleVelocity.x += Math.sin(banking) * gravity;
+            
+            // Move along track direction instead of fixed Z axis
+            marble.position.add(tangent.multiplyScalar(speed));
+            marble.position.add(binormal.multiplyScalar(marbleVelocity.x));
+            
+            // Keep marble on track (simplified)
+            const trackPoint = trackCurve.getPoint(closestT);
+            marble.position.y = Math.max(marble.position.y, trackPoint.y + 0.5);
+            
+            // Apply friction
+            marbleVelocity.multiplyScalar(0.98);
+            
+            // Check for falling off - increased tolerance
+            const distanceFromTrack = marble.position.distanceTo(trackPoint);
+            if (distanceFromTrack > 5) {
+                console.log("Distance from track:", distanceFromTrack);
+                isGameOver = true;
+                return;
+            }
+            
+            // Rotate marble
+            marble.rotation.x -= speed * 2;
+        }
+        
+        function updateCamera() {
+            // Get current track direction
+            const closestT = trackCurve.getUtoTmapping(
+                trackCurve.getPointAt(0).distanceTo(marble.position) / 50
+            );
+            const tangent = trackCurve.getTangent(closestT);
+            
+            // Position camera behind marble relative to track direction
+            const cameraOffset = new THREE.Vector3()
+                .copy(tangent)
+                .multiplyScalar(-5); // Added negative sign to position behind marble
+            
+            camera.position.copy(marble.position)
+                .add(new THREE.Vector3(0, 2, 0)) // Height offset
+                .add(cameraOffset);
+            
+            camera.lookAt(marble.position);
+        }
+        
+        function generateTrackChunk(startPoint) {
+            let points = [];
+            let currentPoint = startPoint ? startPoint.clone() : new THREE.Vector3(0, 0, 0);
+            
+            for (let i = 0; i < POINTS_PER_CHUNK; i++) {
+                points.push(currentPoint.clone());
+                
+                // Generate next point with controlled randomness
+                let nextPoint = currentPoint.clone();
+                nextPoint.z += 10;  // Changed to positive to match marble movement direction
+                
+                // Add some random variation
+                nextPoint.x += (Math.random() - 0.5) * 5;  // Left/right
+                nextPoint.y += (Math.random() - 0.5) * 2;  // Up/down
+                
+                // Limit extreme changes
+                nextPoint.x = THREE.MathUtils.clamp(nextPoint.x, -10, 10);
+                nextPoint.y = THREE.MathUtils.clamp(nextPoint.y, -5, 5);
+                
+                currentPoint = nextPoint;
+            }
+            
+            lastChunkEnd = points[points.length - 1];
+            return points;
+        }
+        
+        function updateTrack() {
+            // Get marble's progress through current chunk
+            const marbleChunkProgress = (marble.position.z) / (POINTS_PER_CHUNK * 10);
+            const currentChunk = Math.floor(marbleChunkProgress);
+            
+            console.log("Chunk progress:", marbleChunkProgress, "Current chunk:", currentChunk);
+            
+            // Generate new chunks if needed
+            while (currentChunk + VISIBLE_CHUNKS > trackChunks.length) {
+                const newChunkPoints = generateTrackChunk(lastChunkEnd);
+                trackChunks.push(newChunkPoints);
+                
+                // Update track geometry
+                updateTrackGeometry();
+            }
+            
+            // Remove old chunks
+            while (currentChunk > 1 && trackChunks.length > VISIBLE_CHUNKS) {
+                trackChunks.shift();
+                chunkIndex++;
+                
+                // Clean up old track segments
+                const segmentsToRemove = Math.floor(trackSegments.length / VISIBLE_CHUNKS);
+                for (let i = 0; i < segmentsToRemove; i++) {
+                    const segment = trackSegments.shift();
+                    if (segment) {
+                        scene.remove(segment);
+                        segment.geometry.dispose();
+                        segment.material.dispose();
+                    }
+                }
+            }
+        }
+        
+        function updateTrackGeometry() {
+            // Combine all visible chunk points
+            let allPoints = [];
+            trackChunks.forEach(chunk => {
+                allPoints = allPoints.concat(chunk);
+            });
+            
+            // Create new curve from all points
+            trackCurve = new THREE.CatmullRomCurve3(allPoints);
+            
+            // Generate new track segments
+            const segments = 25;  // Reduced number of segments
+            const trackWidth = 5;
+            const segmentLength = 2;  // Explicit segment length
+            
+            for (let i = 0; i < segments; i++) {
+                const t1 = i / segments;
+                const t2 = (i + 1) / segments;
+                
+                const pos1 = trackCurve.getPoint(t1);
+                const pos2 = trackCurve.getPoint(t2);
+                
+                // Calculate segment orientation
+                const tangent = trackCurve.getTangent(t1);
+                const normal = new THREE.Vector3(0, 1, 0);
+                const binormal = new THREE.Vector3().crossVectors(tangent, normal);
+                
+                // Create track segment geometry with explicit length
+                const segmentGeometry = new THREE.PlaneGeometry(trackWidth, segmentLength);
+                const segmentMaterial = new THREE.MeshPhongMaterial({ 
+                    color: 0x808080,
+                    side: THREE.DoubleSide 
+                });
+                
+                const segment = new THREE.Mesh(segmentGeometry, segmentMaterial);
+                
+                // Position and orient segment
+                segment.position.copy(pos1);
+                segment.lookAt(pos2);
+                segment.rotateX(-Math.PI / 2);
+                
+                trackSegments.push(segment);
+                scene.add(segment);
+            }
+        }
+        
+        // Start the game
+        init();
+    </script>
+</body>
+</html>
