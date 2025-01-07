@@ -294,22 +294,24 @@
                         paths = [tile, ...newPaths[0]];
                         paths[0].supply += accumulatedSupply + goalSupply;
 
-                        /*
                         newPaths[0][0].suppliers.forEach(newSupplier => {
                             if (!accumulatedSuppliers.some(existing => existing.equals(newSupplier))) {
                                 accumulatedSuppliers.push(newSupplier);
                             }
+                        });
+                        if (goalSupply > 0) {
+                            // Add the current tile if it has supply and isn't already in the list
+                            if (!accumulatedSuppliers.some(existing => existing.equals(tile))) {
+                                accumulatedSuppliers.push(tile);
+                            }
                         }
                         paths[0].suppliers = accumulatedSuppliers;
-                        if (goalSupply > 0) {
-                            // if this is a tile with supply, merge it in
-                        }
-                        */
                     } else {
                         // we are at the starting point of the path
                         paths = [tile];
                         paths[0].supply = goalSupply;
                         if (goalSupply > 0) {
+                            // add the tile to the list of suppliers if it has supply
                             paths[0].suppliers = [tile];
                         }
                     }
@@ -389,6 +391,8 @@
                         false
                     );
                     
+                    prettyPrintPaths(paths);
+
                     if (paths.length > 0) {
                         generateTraffic(trafficMap, paths, 1.0);
                     }
@@ -401,6 +405,33 @@
             console.log(demandedSupplyMap);
 
             drawGrid();
+        }
+
+        function prettyPrintPaths(paths, indent = 0) {
+            if (!paths || paths.length === 0) {
+                console.log(" ".repeat(indent) + "Empty path");
+                return;
+            }
+
+            if (Array.isArray(paths[0])) {
+                // Node scenario with multiple branches
+                console.log(" ".repeat(indent) + "Node with branches:");
+                paths.forEach((branch, index) => {
+                    console.log(" ".repeat(indent + 2) + `Branch ${index + 1}:`);
+                    prettyPrintPaths(branch, indent + 4);
+                });
+            } else {
+                // Path scenario
+                const firstTile = paths[0];
+                console.log(" ".repeat(indent) + `Path starting at (${firstTile.x}, ${firstTile.y}):`);
+                console.log(" ".repeat(indent + 2) + `Supply: ${firstTile.supply}`);
+                console.log(" ".repeat(indent + 2) + "Suppliers:", firstTile.suppliers.map(s => `(${s.x}, ${s.y})`).join(', '));
+                
+                if (paths.length > 1 && Array.isArray(paths[1])) {
+                    console.log(" ".repeat(indent + 2) + "Branches:");
+                    prettyPrintPaths(paths[1], indent + 4);
+                }
+            }
         }
 
         // Add these variables after other initialization code

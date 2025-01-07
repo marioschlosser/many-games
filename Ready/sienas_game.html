@@ -1,0 +1,1162 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Catch the Dogs!</title>
+    <style>
+        canvas {
+            border: 2px solid black;
+            display: block;
+            margin: 0 auto;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Initialize the game object with all required properties
+        const game = {
+            state: 'title',
+            coins: 0,
+            lives: 3,
+            score: 0,
+            animals: [],
+            stars: [],
+            mountains: {},
+            starTwinkle: 0,
+            currentBucketColor: '#4A3101',
+            bucket: {
+                x: 0,
+                y: 0,
+                width: 60,
+                height: 40,
+                speed: 5
+            },
+            keys: {
+                left: false,
+                right: false
+            },
+            difficultySettings: {
+                easy: {
+                    animalSpeed: { 
+                        dog: 0.8,
+                        cat: 1.2,
+                        parrot: 2.5
+                    },
+                    spawnInterval: 2000,
+                    dogChance: 0.9,
+                    bucketSpeed: 5
+                },
+                medium: {
+                    animalSpeed: { 
+                        dog: 1.0,
+                        cat: 1.4,
+                        parrot: 3.0
+                    },
+                    spawnInterval: 1800,
+                    dogChance: 0.87,
+                    bucketSpeed: 4
+                },
+                hard: {
+                    animalSpeed: { 
+                        dog: 1.2,
+                        cat: 1.8,
+                        parrot: 3.5
+                    },
+                    spawnInterval: 1500,
+                    dogChance: 0.85,
+                    bucketSpeed: 3
+                }
+            },
+            bucketShop: {
+                '#4A3101': { name: 'Classic Brown', price: 0, owned: true },
+                '#FF0000': { name: 'Cherry Red', price: 100, owned: false },
+                '#4169E1': { name: 'Royal Blue', price: 150, owned: false },
+                '#FFD700': { name: 'Golden', price: 200, owned: false },
+                '#800080': { name: 'Royal Purple', price: 250, owned: false },
+                '#FF69B4': { name: 'Hot Pink', price: 300, owned: false }
+            },
+            maxSimultaneousAnimals: 5,
+            lastSpawnTime: Date.now(),
+            spawnInterval: 2000
+        };
+
+        // Initialize game on window load
+        window.onload = function() {
+            console.log('Game initializing...');
+            
+            // Set canvas size
+            canvas.width = 800;
+            canvas.height = 600;
+            
+            // Initialize bucket position at bottom of screen
+            game.bucket.x = canvas.width / 2;
+            game.bucket.y = canvas.height - 100;  // Position bucket near bottom
+            
+            // Initialize game state
+            game.state = 'title';
+            game.lastState = null;
+            
+            // Initialize background elements
+            game.stars = generateStars();
+            game.mountains = {
+                back: generateMountainPoints(0.75),
+                middle: generateMountainPoints(0.65),
+                front: generateMountainPoints(0.55)
+            };
+            
+            console.log('Game initialized, starting game loop');
+            requestAnimationFrame(gameLoop);
+        };
+
+        // Make sure gameLoop is properly defined
+        function gameLoop() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Only log state changes
+            if (game.lastState !== game.state) {
+                console.log('State changed from', game.lastState, 'to', game.state);
+                game.lastState = game.state;
+            }
+            
+            switch(game.state) {
+                case 'title':
+                    drawBackground();
+                    drawTitle();
+                    break;
+                case 'difficulty':
+                    drawBackground();
+                    drawDifficultySelect();
+                    break;
+                case 'shop':
+                    drawBackground();
+                    drawShop();
+                    break;
+                case 'playing':
+                    if (game.lives > 0) {
+                        update();
+                        draw();
+                    } else {
+                        game.state = 'gameOver';
+                    }
+                    break;
+                case 'gameOver':
+                    drawBackground();
+                    drawGameOver();
+                    break;
+            }
+            
+            requestAnimationFrame(gameLoop);
+        }
+
+        function generateMountainPoints(heightFactor) {
+            const points = [];
+            const baseHeight = canvas.height * heightFactor;
+            let x = -100;
+            
+            while (x < canvas.width + 100) {
+                const peakHeight = Math.random() * 150 + 100;
+                const width = Math.random() * 200 + 100;
+                points.push({
+                    x: x + width/2,
+                    y: baseHeight - peakHeight,
+                    width: width,
+                    baseHeight: baseHeight
+                });
+                x += width;
+            }
+            
+            return points;
+        }
+
+        function drawMountainRange(points, mountainColor, snowColor, opacity) {
+            // Mountain body
+            ctx.fillStyle = mountainColor;
+            ctx.beginPath();
+            ctx.moveTo(0, canvas.height);
+            
+            // Draw using stored points
+            points.forEach(peak => {
+                ctx.lineTo(peak.x, peak.y);
+            });
+            
+            ctx.lineTo(canvas.width, canvas.height);
+            ctx.closePath();
+            ctx.fill();
+            
+            // Snow caps with gradient
+            const snowGradient = ctx.createLinearGradient(
+                0, points[0].baseHeight - 200,
+                0, points[0].baseHeight - 50
+            );
+            snowGradient.addColorStop(0, snowColor);
+            snowGradient.addColorStop(1, `rgba(255, 255, 255, ${opacity})`);
+            
+            ctx.fillStyle = snowGradient;
+            ctx.beginPath();
+            
+            points.forEach(peak => {
+                const snowLine = peak.y + peak.width * 0.3;
+                ctx.lineTo(peak.x, snowLine);
+            });
+            
+            ctx.lineTo(canvas.width, points[0].baseHeight);
+            ctx.lineTo(0, points[0].baseHeight);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        function createAnimal() {
+            const isDog = Math.random() < 0.7;  // 70% chance for dog
+            const isParrot = !isDog && Math.random() < 0.3;  // 30% chance for parrot if not dog
+            
+            return {
+                x: Math.random() * (canvas.width - 40),  // Random x position
+                y: -50,  // Start above screen
+                width: 40,
+                height: 40,
+                speed: isDog ? 2 : (isParrot ? 3 : 4),  // Different speeds for different animals
+                isDog: isDog,
+                isParrot: isParrot,
+                isCat: !isDog && !isParrot
+            };
+        }
+
+        function drawBucket() {
+            ctx.fillStyle = game.currentBucketColor;
+            // Metallic gradient for bucket
+            let bucketGradient = ctx.createLinearGradient(
+                game.bucket.x, game.bucket.y, 
+                game.bucket.x + game.bucket.width, game.bucket.y + game.bucket.height
+            );
+            bucketGradient.addColorStop(0, '#8B8B8B');
+            bucketGradient.addColorStop(0.3, '#C0C0C0');
+            bucketGradient.addColorStop(0.7, '#A8A8A8');
+            bucketGradient.addColorStop(1, '#707070');
+
+            // Main bucket body
+            ctx.fillStyle = bucketGradient;
+            ctx.beginPath();
+            ctx.moveTo(game.bucket.x, game.bucket.y);
+            ctx.lineTo(game.bucket.x + game.bucket.width, game.bucket.y);
+            ctx.lineTo(game.bucket.x + game.bucket.width - 5, game.bucket.y + game.bucket.height);
+            ctx.lineTo(game.bucket.x + 5, game.bucket.y + game.bucket.height);
+            ctx.closePath();
+            ctx.fill();
+
+            // Bucket rim
+            ctx.beginPath();
+            ctx.moveTo(game.bucket.x - 5, game.bucket.y);
+            ctx.lineTo(game.bucket.x + game.bucket.width + 5, game.bucket.y);
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = '#E8E8E8';
+            ctx.stroke();
+
+            // Bucket handle
+            ctx.beginPath();
+            ctx.arc(game.bucket.x + game.bucket.width/2, game.bucket.y, 
+                    game.bucket.width/2 + 10, 0, Math.PI, true);
+            ctx.strokeStyle = '#707070';
+            ctx.lineWidth = 4;
+            ctx.stroke();
+
+            // Metallic highlights
+            ctx.beginPath();
+            ctx.moveTo(game.bucket.x + 10, game.bucket.y + 5);
+            ctx.lineTo(game.bucket.x + 10, game.bucket.y + game.bucket.height - 5);
+            ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+            ctx.lineWidth = 5;
+            ctx.stroke();
+        }
+
+        function drawFur(x, y, radius, baseColor, furLength = 1.5) {
+            const furCount = 180; // Increased density
+            const angleStep = (Math.PI * 2) / furCount;
+            
+            // Create multiple layers of fur for depth
+            for (let layer = 0; layer < 3; layer++) {
+                const layerRadius = radius - layer * 0.5;
+                const layerColor = layer === 0 ? baseColor : 
+                                  `rgba(${hexToRgb(baseColor).join(',')},${0.8 - layer * 0.2})`;
+                
+                ctx.strokeStyle = layerColor;
+                ctx.lineWidth = 0.3; // Very thin lines
+                
+                for (let i = 0; i < furCount; i++) {
+                    const angle = i * angleStep;
+                    const furRandomness = Math.random() * 0.8;
+                    const startX = x + Math.cos(angle) * layerRadius;
+                    const startY = y + Math.sin(angle) * layerRadius;
+                    const endX = startX + Math.cos(angle) * (furLength + furRandomness);
+                    const endY = startY + Math.sin(angle) * (furLength + furRandomness);
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(startX, startY);
+                    ctx.lineTo(endX, endY);
+                    ctx.stroke();
+                }
+            }
+        }
+
+        function hexToRgb(hex) {
+            const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+            return result ? [
+                parseInt(result[1], 16),
+                parseInt(result[2], 16),
+                parseInt(result[3], 16)
+            ] : [0, 0, 0];
+        }
+
+        function drawAnimal(animal) {
+            if (animal.isParrot) {
+                // Shadow
+                ctx.shadowColor = 'rgba(0,0,0,0.2)';
+                ctx.shadowBlur = 5;
+                ctx.shadowOffsetX = 2;
+                ctx.shadowOffsetY = 2;
+
+                // Body base
+                const bodyGradient = ctx.createRadialGradient(
+                    animal.x + 22, animal.y + 22, 0,
+                    animal.x + 22, animal.y + 22, 22
+                );
+                bodyGradient.addColorStop(0, '#43A047');
+                bodyGradient.addColorStop(0.6, '#2E7D32');
+                bodyGradient.addColorStop(1, '#1B5E20');
+                
+                ctx.fillStyle = bodyGradient;
+                ctx.beginPath();
+                ctx.arc(animal.x + 22, animal.y + 22, 22, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Detailed feathers
+                for (let i = 0; i < 24; i++) {
+                    const angle = (i * Math.PI) / 12;
+                    const featherGradient = ctx.createLinearGradient(
+                        animal.x + 22, animal.y + 22,
+                        animal.x + 22 + Math.cos(angle) * 22,
+                        animal.y + 22 + Math.sin(angle) * 22
+                    );
+                    featherGradient.addColorStop(0, '#66BB6A');
+                    featherGradient.addColorStop(1, '#2E7D32');
+                    
+                    ctx.fillStyle = featherGradient;
+                    ctx.beginPath();
+                    ctx.ellipse(
+                        animal.x + 22 + Math.cos(angle) * 15,
+                        animal.y + 22 + Math.sin(angle) * 15,
+                        8, 2,
+                        angle,
+                        0, Math.PI * 2
+                    );
+                    ctx.fill();
+                }
+
+                // Wing with layered feathers
+                ctx.save();
+                ctx.translate(animal.x + 8, animal.y + 22);
+                ctx.rotate(Math.sin(animal.wingAngle) * 0.3);
+                
+                const featherColors = ['#1B5E20', '#2E7D32', '#43A047'];
+                featherColors.forEach((color, i) => {
+                    const wingGradient = ctx.createLinearGradient(-20, 0, 20, 0);
+                    wingGradient.addColorStop(0, color);
+                    wingGradient.addColorStop(1, '#66BB6A');
+                    
+                    ctx.fillStyle = wingGradient;
+                    ctx.beginPath();
+                    ctx.ellipse(0, i * 3, 20 - i * 2, 12 - i * 2, Math.PI / 4, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+                ctx.restore();
+
+            } else if (animal.isDog) {
+                // Dog's body with gradient fur
+                const bodyGradient = ctx.createRadialGradient(
+                    animal.x + 22, animal.y + 22, 0,
+                    animal.x + 22, animal.y + 22, 22
+                );
+                bodyGradient.addColorStop(0, '#8B4513');
+                bodyGradient.addColorStop(0.7, '#654321');
+                bodyGradient.addColorStop(1, '#543210');
+                
+                ctx.fillStyle = bodyGradient;
+                ctx.beginPath();
+                ctx.arc(animal.x + 22, animal.y + 22, 22, 0, Math.PI * 2);
+                ctx.fill();
+                
+                drawFur(animal.x + 22, animal.y + 22, 22, '#8B4513');
+
+                // Face with gradient
+                const faceGradient = ctx.createRadialGradient(
+                    animal.x + 33, animal.y + 18, 0,
+                    animal.x + 33, animal.y + 18, 15
+                );
+                faceGradient.addColorStop(0, '#DEB887');
+                faceGradient.addColorStop(1, '#CD853F');
+                
+                ctx.fillStyle = faceGradient;
+                ctx.beginPath();
+                ctx.arc(animal.x + 33, animal.y + 18, 15, 0, Math.PI * 2);
+                ctx.fill();
+                
+                drawFur(animal.x + 33, animal.y + 18, 15, '#DEB887', 1);
+
+                // Realistic eyes
+                const eyeGradient = ctx.createRadialGradient(
+                    animal.x + 27, animal.y + 15, 0,
+                    animal.x + 27, animal.y + 15, 3
+                );
+                eyeGradient.addColorStop(0, '#4B2F00');
+                eyeGradient.addColorStop(0.8, '#241700');
+                eyeGradient.addColorStop(1, '#000000');
+                
+                ctx.fillStyle = eyeGradient;
+                ['27', '39'].forEach(xPos => {
+                    ctx.beginPath();
+                    ctx.arc(animal.x + parseInt(xPos), animal.y + 15, 3, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    // Eye shine
+                    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+                    ctx.beginPath();
+                    ctx.arc(animal.x + parseInt(xPos) + 1, animal.y + 14, 1, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+
+                // Wet nose with shine
+                const noseGradient = ctx.createRadialGradient(
+                    animal.x + 37, animal.y + 21, 0,
+                    animal.x + 37, animal.y + 21, 4.5
+                );
+                noseGradient.addColorStop(0, '#000000');
+                noseGradient.addColorStop(1, '#1A1A1A');
+                
+                ctx.fillStyle = noseGradient;
+                ctx.beginPath();
+                ctx.arc(animal.x + 37, animal.y + 21, 4.5, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Nose shine
+                ctx.fillStyle = 'rgba(255,255,255,0.4)';
+                ctx.beginPath();
+                ctx.ellipse(animal.x + 36, animal.y + 20, 1.5, 1, 0, 0, Math.PI * 2);
+                ctx.fill();
+
+            } else {
+                // Cat's body with gradient fur
+                const bodyGradient = ctx.createRadialGradient(
+                    animal.x + 22, animal.y + 22, 0,
+                    animal.x + 22, animal.y + 22, 22
+                );
+                bodyGradient.addColorStop(0, '#A0A0A0');
+                bodyGradient.addColorStop(0.7, '#808080');
+                bodyGradient.addColorStop(1, '#606060');
+                
+                ctx.fillStyle = bodyGradient;
+                ctx.beginPath();
+                ctx.arc(animal.x + 22, animal.y + 22, 22, 0, Math.PI * 2);
+                ctx.fill();
+                
+                drawFur(animal.x + 22, animal.y + 22, 22, '#808080');
+
+                // Face with gradient
+                const faceGradient = ctx.createRadialGradient(
+                    animal.x + 33, animal.y + 18, 0,
+                    animal.x + 33, animal.y + 18, 15
+                );
+                faceGradient.addColorStop(0, '#E8E8E8');
+                faceGradient.addColorStop(1, '#D3D3D3');
+                
+                ctx.fillStyle = faceGradient;
+                ctx.beginPath();
+                ctx.arc(animal.x + 33, animal.y + 18, 15, 0, Math.PI * 2);
+                ctx.fill();
+                
+                drawFur(animal.x + 33, animal.y + 18, 15, '#D3D3D3', 1);
+
+                // Cat eyes with complex gradient
+                ['27', '39'].forEach(xPos => {
+                    const eyeGradient = ctx.createRadialGradient(
+                        animal.x + parseInt(xPos), animal.y + 15, 0,
+                        animal.x + parseInt(xPos), animal.y + 15, 4.5
+                    );
+                    eyeGradient.addColorStop(0, '#00FF00');
+                    eyeGradient.addColorStop(0.5, '#008000');
+                    eyeGradient.addColorStop(0.8, '#004000');
+                    eyeGradient.addColorStop(1, '#002000');
+                    
+                    ctx.fillStyle = eyeGradient;
+                    ctx.beginPath();
+                    ctx.ellipse(animal.x + parseInt(xPos), animal.y + 15, 4.5, 3, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    // Cat pupils
+                    ctx.fillStyle = '#000000';
+                    ctx.beginPath();
+                    ctx.ellipse(animal.x + parseInt(xPos), animal.y + 15, 1.5, 3, 0, 0, Math.PI * 2);
+                    ctx.fill();
+                    
+                    // Eye shine
+                    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+                    ctx.beginPath();
+                    ctx.arc(animal.x + parseInt(xPos) - 1, animal.y + 13, 1, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+            }
+            
+            ctx.shadowColor = 'transparent';
+        }
+
+        function drawHUD() {
+            ctx.fillStyle = 'white';
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 3;
+            ctx.font = '20px Arial';
+            
+            const scoreText = `Lives: ${game.lives}  Score: ${game.score}`;
+            ctx.strokeText(scoreText, 10, 30);
+            ctx.fillText(scoreText, 10, 30);
+        }
+
+        function update() {
+            // Move bucket
+            if (game.keys.left && game.bucket.x > 0) {
+                game.bucket.x -= game.bucket.speed;
+            }
+            if (game.keys.right && game.bucket.x < canvas.width - game.bucket.width) {
+                game.bucket.x += game.bucket.speed;
+            }
+
+            // Update animals with a standard for loop to handle removals safely
+            for (let i = game.animals.length - 1; i >= 0; i--) {
+                const animal = game.animals[i];
+                
+                // Move animal
+                animal.y += animal.speed;
+
+                // Check for collision with bucket and handle it
+                if (animal.y + animal.height > game.bucket.y && 
+                    animal.y < game.bucket.y + game.bucket.height &&
+                    animal.x + animal.width > game.bucket.x && 
+                    animal.x < game.bucket.x + game.bucket.width) {
+                    
+                    // Handle scoring based on animal type
+                    if (animal.isDog) {
+                        game.score += 10;
+                        game.coins += 5;  // Add coins for catching dogs
+                        game.dogsCaught++;
+                    } else if (animal.isParrot) {
+                        game.score += 50;
+                        game.coins += 25;  // Add coins for catching parrots
+                    } else {
+                        game.lives--;
+                        game.catsCollected++;
+                    }
+                    
+                    // Remove the animal
+                    game.animals.splice(i, 1);
+                    continue;
+                }
+
+                // Remove if passed bottom
+                if (animal.y > canvas.height) {
+                    if (animal.isDog) {
+                        game.lives--;
+                        game.droppedDogs++;
+                    }
+                    if (animal.isParrot) game.score--;
+                    game.animals.splice(i, 1);
+                }
+            }
+
+            // Controlled spawn logic
+            const currentTime = Date.now();
+            const activeAnimals = game.animals.length;
+            const timeSinceLastSpawn = currentTime - game.lastSpawnTime;
+            
+            if (activeAnimals < game.maxSimultaneousAnimals && 
+                timeSinceLastSpawn >= game.spawnInterval) {
+                
+                // Check if we should spawn a parrot
+                if (game.dogsCaught === 10) {
+                    game.animals.push(createAnimal());
+                    game.lastSpawnTime = currentTime;
+                } else {
+                    // Random chance to spawn, but only if we're under the limit
+                    if (Math.random() < 0.3) { // 30% chance each interval
+                        game.animals.push(createAnimal());
+                        game.lastSpawnTime = currentTime;
+                    }
+                }
+            }
+        }
+
+        function generateStars() {
+            const stars = [];
+            for (let i = 0; i < 100; i++) {
+                stars.push({
+                    x: Math.random() * canvas.width,
+                    y: Math.random() * (canvas.height * 0.4),
+                    size: Math.random() * 2,
+                    twinkleSpeed: Math.random() * 0.02 + 0.01, // Slow twinkle speed
+                    twinkleOffset: Math.random() * Math.PI * 2 // Random start phase
+                });
+            }
+            return stars;
+        }
+
+        function drawBackground() {
+            // Sky gradient
+            let skyGradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            skyGradient.addColorStop(0, '#0B1026');
+            skyGradient.addColorStop(0.2, '#1B2F69');
+            skyGradient.addColorStop(0.4, '#AB4E68');
+            skyGradient.addColorStop(0.6, '#FF9A8B');
+            skyGradient.addColorStop(0.8, '#FFD5C9');
+            skyGradient.addColorStop(1, '#FFF1E6');
+            
+            ctx.fillStyle = skyGradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Update star twinkle
+            game.starTwinkle += 0.01;
+            
+            // Draw fixed stars with slow twinkle
+            game.stars.forEach(star => {
+                const twinkle = Math.sin(game.starTwinkle + star.twinkleOffset);
+                const opacity = 0.5 + (twinkle * 0.3); // Opacity varies between 0.2 and 0.8
+                
+                ctx.fillStyle = `rgba(255, 255, 255, ${opacity})`;
+                ctx.beginPath();
+                ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+                ctx.fill();
+            });
+            
+            // Sun with glow
+            const sunX = canvas.width - 150;
+            const sunY = 150;
+            
+            // Outer glow
+            const outerGlow = ctx.createRadialGradient(
+                sunX, sunY, 0,
+                sunX, sunY, 120
+            );
+            outerGlow.addColorStop(0, 'rgba(255, 210, 150, 0.4)');
+            outerGlow.addColorStop(0.5, 'rgba(255, 169, 119, 0.2)');
+            outerGlow.addColorStop(1, 'rgba(255, 169, 119, 0)');
+            
+            ctx.fillStyle = outerGlow;
+            ctx.beginPath();
+            ctx.arc(sunX, sunY, 120, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Inner glow
+            const innerGlow = ctx.createRadialGradient(
+                sunX, sunY, 0,
+                sunX, sunY, 60
+            );
+            innerGlow.addColorStop(0, '#FFF3E0');
+            innerGlow.addColorStop(0.5, '#FFE0B2');
+            innerGlow.addColorStop(1, '#FFB74D');
+            
+            ctx.fillStyle = innerGlow;
+            ctx.beginPath();
+            ctx.arc(sunX, sunY, 60, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Draw mountain ranges using stored points
+            drawMountainRange(game.mountains.back, '#2B3C5A', '#D6E6F2', 0.6);
+            drawMountainRange(game.mountains.middle, '#3D4B66', '#E1EDF5', 0.7);
+            drawMountainRange(game.mountains.front, '#4E5A73', '#EDF4F8', 0.8);
+        }
+
+        function draw() {
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw background first
+            drawBackground();
+            
+            // Draw game elements
+            drawBucket();
+            game.animals.forEach(drawAnimal);
+            drawHUD();
+        }
+
+        function drawGameOver() {
+            drawBackground();
+            
+            ctx.fillStyle = 'white';
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 4;
+            
+            // Draw stats
+            ctx.font = '24px Arial';
+            ctx.fillText(`Final Score: ${game.score}`, canvas.width/2 - 70, canvas.height/2 - 80);
+            ctx.fillText(`Dogs Dropped: ${game.droppedDogs}`, canvas.width/2 - 80, canvas.height/2 - 40);
+            ctx.fillText(`Cats Collected: ${game.catsCollected}`, canvas.width/2 - 85, canvas.height/2);
+            
+            // Draw Game Over
+            ctx.font = '48px Arial';
+            ctx.fillText('Game Over!', canvas.width/2 - 100, canvas.height/2 + 60);
+            
+            // Draw restart button
+            drawButton('Restart Level', canvas.width/2, canvas.height/2 + 120, 200, 50);
+            
+            // Draw home button
+            drawButton('Home Screen', canvas.width/2, canvas.height/2 + 180, 200, 50);
+        }
+
+        function drawTitle() {
+            // Background
+            drawBackground();
+            
+            // Title
+            ctx.fillStyle = 'white';
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 8;
+            ctx.font = 'bold 72px Arial';
+            const title = 'Catch the Dogs!';
+            const titleWidth = ctx.measureText(title).width;
+            ctx.strokeText(title, (canvas.width - titleWidth) / 2, 200);
+            ctx.fillText(title, (canvas.width - titleWidth) / 2, 200);
+            
+            // Play button - centered vertically and horizontally
+            drawButton('Play!', canvas.width/2, canvas.height/2, 200, 60);
+            
+            // Shop button - below play button
+            drawButton('Shop', canvas.width/2, canvas.height/2 + 80, 200, 60);
+            
+            // Display coins
+            ctx.fillStyle = 'white';
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 3;
+            ctx.font = '24px Arial';
+            const coinsText = `Coins: ${game.coins}`;
+            ctx.strokeText(coinsText, 10, 30);
+            ctx.fillText(coinsText, 10, 30);
+        }
+
+        function drawDifficultySelect() {
+            // Background
+            drawBackground();
+            
+            // Title
+            ctx.fillStyle = 'white';
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 4;
+            ctx.font = 'bold 48px Arial';
+            const title = 'Select Difficulty';
+            const titleWidth = ctx.measureText(title).width;
+            ctx.strokeText(title, (canvas.width - titleWidth) / 2, 150);
+            ctx.fillText(title, (canvas.width - titleWidth) / 2, 150);
+            
+            // Difficulty buttons
+            drawButton('Easy', canvas.width/2, canvas.height/2 - 80, 200, 60);
+            drawButton('Medium', canvas.width/2, canvas.height/2, 200, 60);
+            drawButton('Hard', canvas.width/2, canvas.height/2 + 80, 200, 60);
+        }
+
+        function drawButton(text, x, y, width, height, color = '#4CAF50') {
+            const buttonX = x - width/2;
+            const buttonY = y - height/2;
+            
+            // Button shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+            ctx.fillRect(buttonX + 4, buttonY + 4, width, height);
+            
+            // Button background
+            const gradient = ctx.createLinearGradient(buttonX, buttonY, buttonX, buttonY + height);
+            gradient.addColorStop(0, color);
+            gradient.addColorStop(1, shadeColor(color, -10));
+            ctx.fillStyle = gradient;
+            ctx.fillRect(buttonX, buttonY, width, height);
+            
+            // Button border
+            ctx.strokeStyle = shadeColor(color, -20);
+            ctx.lineWidth = 2;
+            ctx.strokeRect(buttonX, buttonY, width, height);
+            
+            // Button text
+            ctx.fillStyle = 'white';
+            ctx.font = 'bold 24px Arial';
+            const textWidth = ctx.measureText(text).width;
+            ctx.fillText(text, buttonX + (width - textWidth)/2, buttonY + height/2 + 8);
+        }
+
+        function startGame(difficulty) {
+            game.state = 'playing';
+            game.difficulty = difficulty;
+            game.lives = 3;
+            game.score = 0;
+            game.animals = [];
+            game.dogsCaught = 0;
+            game.droppedDogs = 0;
+            game.catsCollected = 0;
+            game.lastSpawnTime = Date.now();
+            game.spawnInterval = game.difficultySettings[difficulty].spawnInterval;
+            game.bucket.x = canvas.width / 2;
+            game.bucket.speed = game.difficultySettings[difficulty].bucketSpeed;
+            
+            // Regenerate background elements
+            game.stars = generateStars();
+            game.starTwinkle = 0;
+            game.mountains = {
+                back: generateMountainPoints(0.75),
+                middle: generateMountainPoints(0.65),
+                front: generateMountainPoints(0.55)
+            };
+        }
+
+        // Event listeners
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowLeft' || e.key === 'a') game.keys.left = true;
+            if (e.key === 'ArrowRight' || e.key === 'd') game.keys.right = true;
+        });
+
+        document.addEventListener('keyup', (e) => {
+            if (e.key === 'ArrowLeft' || e.key === 'a') game.keys.left = false;
+            if (e.key === 'ArrowRight' || e.key === 'd') game.keys.right = false;
+        });
+
+        // Update click handler to include game over state
+        canvas.addEventListener('click', function(event) {
+            const rect = canvas.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+            
+            console.log('Click at:', x, y);
+            console.log('Current state:', game.state);
+            
+            if (game.state === 'title') {
+                // Play button (centered, 200x60)
+                const playBounds = {
+                    left: canvas.width/2 - 100,
+                    right: canvas.width/2 + 100,
+                    top: canvas.height/2 - 30,
+                    bottom: canvas.height/2 + 30
+                };
+                
+                // Shop button (below play button)
+                const shopBounds = {
+                    left: canvas.width/2 - 100,
+                    right: canvas.width/2 + 100,
+                    top: canvas.height/2 + 50,
+                    bottom: canvas.height/2 + 110
+                };
+                
+                if (x >= playBounds.left && x <= playBounds.right && 
+                    y >= playBounds.top && y <= playBounds.bottom) {
+                    console.log('Play button clicked!');
+                    game.state = 'difficulty';
+                }
+                else if (x >= shopBounds.left && x <= shopBounds.right && 
+                         y >= shopBounds.top && y <= shopBounds.bottom) {
+                    console.log('Shop button clicked!');
+                    game.state = 'shop';
+                }
+            }
+            else if (game.state === 'difficulty') {
+                // Easy button
+                if (y >= canvas.height/2 - 110 && y <= canvas.height/2 - 50 &&
+                    x >= canvas.width/2 - 100 && x <= canvas.width/2 + 100) {
+                    console.log('Easy clicked!');
+                    startGame('easy');
+                }
+                // Medium button
+                else if (y >= canvas.height/2 - 30 && y <= canvas.height/2 + 30 &&
+                         x >= canvas.width/2 - 100 && x <= canvas.width/2 + 100) {
+                    console.log('Medium clicked!');
+                    startGame('medium');
+                }
+                // Hard button
+                else if (y >= canvas.height/2 + 50 && y <= canvas.height/2 + 110 &&
+                         x >= canvas.width/2 - 100 && x <= canvas.width/2 + 100) {
+                    console.log('Hard clicked!');
+                    startGame('hard');
+                }
+            }
+            else if (game.state === 'gameOver') {
+                // Restart button
+                if (y >= canvas.height/2 + 90 && y <= canvas.height/2 + 150 &&
+                    x >= canvas.width/2 - 100 && x <= canvas.width/2 + 100) {
+                    console.log('Restart clicked!');
+                    startGame(game.difficulty);  // Restart with same difficulty
+                }
+                // Home button
+                else if (y >= canvas.height/2 + 150 && y <= canvas.height/2 + 210 &&
+                         x >= canvas.width/2 - 100 && x <= canvas.width/2 + 100) {
+                    console.log('Home clicked!');
+                    game.state = 'title';
+                }
+            }
+        });
+
+        // Add shop screen
+        function drawShop() {
+            // Draw background
+            drawBackground();
+            
+            // Shop title
+            ctx.fillStyle = 'white';
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 4;
+            ctx.font = 'bold 48px Arial';
+            const title = 'Bucket Shop';
+            const titleWidth = ctx.measureText(title).width;
+            ctx.strokeText(title, (canvas.width - titleWidth) / 2, 80);
+            ctx.fillText(title, (canvas.width - titleWidth) / 2, 80);
+            
+            // Display coins
+            ctx.font = '24px Arial';
+            const coinsText = `Coins: ${game.coins}`;
+            ctx.strokeText(coinsText, 10, 30);
+            ctx.fillText(coinsText, 10, 30);
+            
+            // Draw bucket options
+            let y = 150;
+            Object.entries(game.bucketShop).forEach(([color, details]) => {
+                const isSelected = color === game.currentBucketColor;
+                const canBuy = game.coins >= details.price;
+                
+                // Draw bucket preview
+                ctx.fillStyle = color;
+                ctx.fillRect(canvas.width/2 - 150, y, 50, 50);
+                
+                // Draw name and price
+                ctx.fillStyle = 'white';
+                ctx.font = '20px Arial';
+                ctx.fillText(details.name, canvas.width/2 - 80, y + 30);
+                
+                if (details.owned) {
+                    if (isSelected) {
+                        drawButton('Selected', canvas.width/2 + 100, y + 25, 120, 40);
+                    } else {
+                        drawButton('Select', canvas.width/2 + 100, y + 25, 120, 40);
+                    }
+                } else {
+                    drawButton(
+                        `${details.price} coins`, 
+                        canvas.width/2 + 100, 
+                        y + 25, 
+                        120, 
+                        40,
+                        canBuy ? '#4CAF50' : '#808080'
+                    );
+                }
+                
+                y += 70;
+            });
+            
+            // Back button
+            drawButton('Back', canvas.width/2, canvas.height - 50, 200, 50);
+        }
+
+        // Update drawButton to accept color parameter
+        function drawButton(text, x, y, width, height, color = '#4CAF50') {
+            const buttonX = x - width/2;
+            const buttonY = y - height/2;
+            
+            // Button shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+            ctx.fillRect(buttonX + 4, buttonY + 4, width, height);
+            
+            // Button background
+            const gradient = ctx.createLinearGradient(buttonX, buttonY, buttonX, buttonY + height);
+            gradient.addColorStop(0, color);
+            gradient.addColorStop(1, shadeColor(color, -10));
+            ctx.fillStyle = gradient;
+            ctx.fillRect(buttonX, buttonY, width, height);
+            
+            // Button border
+            ctx.strokeStyle = shadeColor(color, -20);
+            ctx.lineWidth = 2;
+            ctx.strokeRect(buttonX, buttonY, width, height);
+            
+            // Button text
+            ctx.fillStyle = 'white';
+            ctx.font = 'bold 24px Arial';
+            const textWidth = ctx.measureText(text).width;
+            ctx.fillText(text, buttonX + (width - textWidth)/2, buttonY + height/2 + 8);
+        }
+
+        // Update click handler
+        canvas.onclick = function(event) {
+            const rect = canvas.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+            
+            if (game.state === 'title') {
+                // Check shop button
+                if (x >= canvas.width/2 - 100 && x <= canvas.width/2 + 100 &&
+                    y >= canvas.height/2 + 50 && y <= canvas.height/2 + 110) {
+                    game.state = 'shop';
+                }
+            }
+            else if (game.state === 'shop') {
+                // Handle bucket selection/purchase
+                let buttonY = 150;
+                Object.entries(game.bucketShop).forEach(([color, details]) => {
+                    if (x >= canvas.width/2 + 40 && x <= canvas.width/2 + 160 &&
+                        y >= buttonY && y <= buttonY + 50) {
+                        if (details.owned) {
+                            game.currentBucketColor = color;
+                        } else if (game.coins >= details.price) {
+                            game.coins -= details.price;
+                            details.owned = true;
+                            game.unlockedBuckets.push(color);
+                            game.currentBucketColor = color;
+                        }
+                    }
+                    buttonY += 70;
+                });
+                
+                // Back button
+                if (x >= canvas.width/2 - 100 && x <= canvas.width/2 + 100 &&
+                    y >= canvas.height - 75 && y <= canvas.height - 25) {
+                    game.state = 'title';
+                }
+            }
+        };
+
+        // Update drawBucket to use selected color
+        function drawBucket() {
+            ctx.fillStyle = game.currentBucketColor;
+            // Metallic gradient for bucket
+            let bucketGradient = ctx.createLinearGradient(
+                game.bucket.x, game.bucket.y, 
+                game.bucket.x + game.bucket.width, game.bucket.y + game.bucket.height
+            );
+            bucketGradient.addColorStop(0, '#8B8B8B');
+            bucketGradient.addColorStop(0.3, '#C0C0C0');
+            bucketGradient.addColorStop(0.7, '#A8A8A8');
+            bucketGradient.addColorStop(1, '#707070');
+
+            // Main bucket body
+            ctx.fillStyle = bucketGradient;
+            ctx.beginPath();
+            ctx.moveTo(game.bucket.x, game.bucket.y);
+            ctx.lineTo(game.bucket.x + game.bucket.width, game.bucket.y);
+            ctx.lineTo(game.bucket.x + game.bucket.width - 5, game.bucket.y + game.bucket.height);
+            ctx.lineTo(game.bucket.x + 5, game.bucket.y + game.bucket.height);
+            ctx.closePath();
+            ctx.fill();
+
+            // Bucket rim
+            ctx.beginPath();
+            ctx.moveTo(game.bucket.x - 5, game.bucket.y);
+            ctx.lineTo(game.bucket.x + game.bucket.width + 5, game.bucket.y);
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = '#E8E8E8';
+            ctx.stroke();
+
+            // Bucket handle
+            ctx.beginPath();
+            ctx.arc(game.bucket.x + game.bucket.width/2, game.bucket.y, 
+                    game.bucket.width/2 + 10, 0, Math.PI, true);
+            ctx.strokeStyle = '#707070';
+            ctx.lineWidth = 4;
+            ctx.stroke();
+
+            // Metallic highlights
+            ctx.beginPath();
+            ctx.moveTo(game.bucket.x + 10, game.bucket.y + 5);
+            ctx.lineTo(game.bucket.x + 10, game.bucket.y + game.bucket.height - 5);
+            ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+            ctx.lineWidth = 5;
+            ctx.stroke();
+        }
+
+        // Update scoring to add coins
+        function update() {
+            // Move bucket
+            if (game.keys.left && game.bucket.x > 0) {
+                game.bucket.x -= game.bucket.speed;
+            }
+            if (game.keys.right && game.bucket.x < canvas.width - game.bucket.width) {
+                game.bucket.x += game.bucket.speed;
+            }
+
+            // Update animals with a standard for loop to handle removals safely
+            for (let i = game.animals.length - 1; i >= 0; i--) {
+                const animal = game.animals[i];
+                
+                // Move animal
+                animal.y += animal.speed;
+
+                // Check for collision with bucket and handle it
+                if (animal.y + animal.height > game.bucket.y && 
+                    animal.y < game.bucket.y + game.bucket.height &&
+                    animal.x + animal.width > game.bucket.x && 
+                    animal.x < game.bucket.x + game.bucket.width) {
+                    
+                    // Handle scoring based on animal type
+                    if (animal.isDog) {
+                        game.score += 10;
+                        game.coins += 5;  // Add coins for catching dogs
+                        game.dogsCaught++;
+                    } else if (animal.isParrot) {
+                        game.score += 50;
+                        game.coins += 25;  // Add coins for catching parrots
+                    } else {
+                        game.lives--;
+                        game.catsCollected++;
+                    }
+                    
+                    // Remove the animal
+                    game.animals.splice(i, 1);
+                    continue;
+                }
+
+                // Remove if passed bottom
+                if (animal.y > canvas.height) {
+                    if (animal.isDog) {
+                        game.lives--;
+                        game.droppedDogs++;
+                    }
+                    if (animal.isParrot) game.score--;
+                    game.animals.splice(i, 1);
+                }
+            }
+
+            // Controlled spawn logic
+            const currentTime = Date.now();
+            const activeAnimals = game.animals.length;
+            const timeSinceLastSpawn = currentTime - game.lastSpawnTime;
+            
+            if (activeAnimals < game.maxSimultaneousAnimals && 
+                timeSinceLastSpawn >= game.spawnInterval) {
+                
+                // Check if we should spawn a parrot
+                if (game.dogsCaught === 10) {
+                    game.animals.push(createAnimal());
+                    game.lastSpawnTime = currentTime;
+                } else {
+                    // Random chance to spawn, but only if we're under the limit
+                    if (Math.random() < 0.3) { // 30% chance each interval
+                        game.animals.push(createAnimal());
+                        game.lastSpawnTime = currentTime;
+                    }
+                }
+            }
+        }
+
+        // Add the shadeColor helper function
+        function shadeColor(color, percent) {
+            const num = parseInt(color.replace('#', ''), 16);
+            const amt = Math.round(2.55 * percent);
+            const R = (num >> 16) + amt;
+            const G = (num >> 8 & 0x00FF) + amt;
+            const B = (num & 0x0000FF) + amt;
+            return '#' + (0x1000000 + 
+                (R < 255 ? R < 1 ? 0 : R : 255) * 0x10000 +
+                (G < 255 ? G < 1 ? 0 : G : 255) * 0x100 +
+                (B < 255 ? B < 1 ? 0 : B : 255)
+            ).toString(16).slice(1);
+        }
+    </script>
+</body>
+</html>
